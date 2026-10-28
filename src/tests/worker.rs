@@ -1,316 +1,239 @@
 use super::*;
-use crate::client::{SignInResponse, UserInfo};
+use crate::config::{Account, Config, Stored};
 
-fn user() -> UserInfo {
-    UserInfo {
-        projects: Vec::new(),
+fn account(id: &str, endpoint: &str) -> Account {
+    Account {
+        id: id.into(),
+        name: id.into(),
+        endpoint: endpoint.into(),
     }
 }
 
-fn response(token: &str) -> SignInResponse {
-    SignInResponse {
-        token: token.into(),
-        user: user(),
-    }
-}
-
-fn creds() -> Credentials {
-    Credentials {
-        email: "a@b".into(),
-        password: "secret".into(),
-    }
-}
-
-/// A JWT-shaped token with a real `exp`, signed with a stub signature.
-fn token(exp: i64) -> String {
-    fn encode(bytes: &[u8]) -> String {
-        const ALPHABET: &[u8; 64] =
-            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-        let mut out = String::new();
-        for chunk in bytes.chunks(3) {
-            let b = [
-                chunk[0],
-                chunk.get(1).copied().unwrap_or(0),
-                chunk.get(2).copied().unwrap_or(0),
-            ];
-            let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
-            // JWT segments are unpadded: a 1- or 2-byte tail yields 2 or 3
-            // characters, and the zero padding must not be emitted.
-            let chars = chunk.len() + 1;
-            for shift in [18, 12, 6, 0].into_iter().take(chars) {
-                out.push(ALPHABET[((n >> shift) & 63) as usize] as char);
-            }
-        }
-        out
-    }
-    format!(
-        "e30.{}.c3R1Yg",
-        encode(format!("{{\"exp\":{exp}}}").as_bytes())
-    )
-}
-
-fn target(token_value: Option<String>, with_password: bool) -> Target {
-    Target {
-        id: "a1".into(),
-        name: "A".into(),
-        endpoint: "http://localhost:8090".into(),
-        project_id: "p1".into(),
-        token: token_value,
-        credentials: with_password.then(creds),
-        allow_password: with_password,
-        auth_blocked: false,
-        auth_retry_at: None,
-        auth_backoff: Duration::ZERO,
-        auth_error: None,
-    }
-}
-
-fn channel() -> (Sender<Update>, Receiver<Update>) {
-    std::sync::mpsc::channel()
-}
-
 #[test]
-fn a_valid_token_is_used_without_signing_in() {
-    let (tx, rx) = channel();
-    let mut target = target(Some(token(2_000_000_000)), true);
-    let mut signins = 0;
-    let result = target.authorized(
-        |_| {
-            signins += 1;
-            Ok(response(&token(2_000_000_000)))
-        },
-        |_, used| {
-            assert_eq!(used, token(2_000_000_000));
-            Ok(7)
-        },
-        &tx,
-        1_700_000_000,
-        Instant::now(),
-    );
-    assert_eq!(result.unwrap(), 7);
-    assert_eq!(signins, 0);
-    assert!(
-        rx.try_recv().is_err(),
-        "nothing to report when nothing changed"
-    );
-}
-
-#[test]
-fn an_expired_token_is_renewed_before_the_query() {
-    let (tx, rx) = channel();
-    let mut target = target(Some(token(100)), true);
-    let mut signins = 0;
-    let result = target.authorized(
-        |_| {
-            signins += 1;
-            Ok(response(&token(2_000_000_000)))
-        },
-        |_, used| {
-            assert_eq!(used, token(2_000_000_000), "query uses the fresh token");
-            Ok(9)
-        },
-        &tx,
-        1_000,
-        Instant::now(),
-    );
-    assert_eq!(result.unwrap(), 9);
-    assert_eq!(signins, 1);
-    assert!(matches!(
-        rx.try_recv(),
-        Ok(Update::TokenRefreshed { account, .. }) if account == "a1"
-    ));
-}
-
-#[test]
-fn a_rejected_token_is_renewed_and_the_query_retried_once() {
-    let (tx, _rx) = channel();
-    let mut target = target(Some("first".into()), true);
-    let mut calls = 0;
-    let result = target.authorized(
-        |_| Ok(response("second")),
-        |_, used| {
-            calls += 1;
-            if used == "first" {
-                Err(ApiError::Expired)
-            } else {
-                Ok(5)
-            }
-        },
-        &tx,
-        1_700_000_000,
-        Instant::now(),
-    );
-    assert_eq!(result.unwrap(), 5);
-    assert_eq!(calls, 2);
-}
-
-#[test]
-fn without_credentials_or_a_token_the_account_cannot_authenticate() {
-    let (tx, _rx) = channel();
-    let mut target = target(None, false);
-    assert!(!target.can_authenticate());
-    let result = target.authorized(
-        |_| panic!("must not sign in without a password"),
-        |_, _| Ok(1),
-        &tx,
-        1_700_000_000,
-        Instant::now(),
-    );
-    assert!(matches!(result, Err(ApiError::Unauthorized)));
-}
-
-#[test]
-fn a_rejected_password_blocks_further_attempts() {
-    let (tx, _rx) = channel();
-    let mut target = target(None, true);
-    let mut signins = 0;
-    let mut signin = |_: &Credentials| {
-        signins += 1;
-        Err(ApiError::Unauthorized)
-    };
-    let mut query = |_: &Target, _: &str| Ok(1);
-    let now = Instant::now();
-
-    assert!(
-        target
-            .authorized(&mut signin, &mut query, &tx, 1_000, now)
-            .is_err()
-    );
-    assert!(target.auth_blocked);
-    // Even long after the backoff, a rejected password is not retried.
-    assert!(
-        target
-            .authorized(
-                &mut signin,
-                &mut query,
-                &tx,
-                1_000,
-                now + Duration::from_secs(600)
-            )
-            .is_err()
-    );
-    assert_eq!(signins, 1);
-}
-
-#[test]
-fn a_transient_signin_failure_is_retried_after_a_backoff() {
-    let (tx, _rx) = channel();
-    let mut target = target(None, true);
-    let signins = std::cell::Cell::new(0);
-    let now = Instant::now();
-    let mut signin = |_: &Credentials| {
-        signins.set(signins.get() + 1);
-        if signins.get() == 1 {
-            Err(ApiError::Unreachable("down".into()))
-        } else {
-            Ok(response("fresh"))
-        }
-    };
-    let mut query = |_: &Target, _: &str| Ok(1);
-
-    assert!(
-        target
-            .authorized(&mut signin, &mut query, &tx, 1_000, now)
-            .is_err()
-    );
-    assert!(
-        !target.auth_blocked,
-        "a network error is not a bad password"
-    );
-    // Inside the backoff window the worker does not hammer the endpoint.
-    assert!(
-        target
-            .authorized(
-                &mut signin,
-                &mut query,
-                &tx,
-                1_000,
-                now + Duration::from_secs(1)
-            )
-            .is_err()
-    );
-    assert_eq!(signins.get(), 1);
-    // After it, the next attempt succeeds and clears the backoff.
-    assert_eq!(
-        target
-            .authorized(
-                &mut signin,
-                &mut query,
-                &tx,
-                1_000,
-                now + Duration::from_secs(3)
-            )
-            .unwrap(),
-        1
-    );
-    assert_eq!(signins.get(), 2);
-    assert!(target.auth_backoff.is_zero());
-}
-
-#[test]
-fn a_query_rejected_after_a_fresh_signin_blocks_the_account() {
-    let (tx, _rx) = channel();
-    let mut target = target(Some(token(100)), true);
-    let mut signins = 0;
-    let result = target.authorized(
-        |_| {
-            signins += 1;
-            Ok(response("still-bad"))
-        },
-        |_, _| Err::<i64, _>(ApiError::Expired),
-        &tx,
-        1_000,
-        Instant::now(),
-    );
-    assert!(result.is_err());
-    assert_eq!(signins, 1, "a fresh token is tried, then the account stops");
-    assert!(target.auth_blocked);
-    assert_eq!(target.token, None);
-}
-
-#[test]
-fn token_mode_never_uses_a_stored_password() {
-    let account = Account {
-        id: "a1".into(),
-        name: "A".into(),
-        endpoint: "http://localhost:8090".into(),
-        project_id: "p1".into(),
+fn one_target_per_connection_with_its_stored_key() {
+    let config = Config {
+        accounts: vec![
+            account("a1", "http://127.0.0.1:3425"),
+            account("a2", "https://magpie.example"),
+        ],
+        ..Config::default()
     };
     let mut stored = Stored::default();
-    stored.set_token("a1", "tok");
-    stored.set_credentials("a1", &creds());
+    stored.set_key("a2", "k2");
 
-    let password_mode = Target::from_account(&account, &stored, CredentialMode::Password);
+    let targets = targets_from(&config, &stored);
+    assert_eq!(targets.len(), 2);
+    assert_eq!(targets[0].key, None);
+    assert_eq!(targets[1].key.as_deref(), Some("k2"));
+    assert_eq!(targets[1].endpoint, "https://magpie.example");
+}
+
+#[test]
+fn the_fetch_window_leaves_room_to_filter_locally() {
+    assert_eq!(fetch_limit(1), 100);
+    assert_eq!(fetch_limit(12), 100);
+    assert_eq!(fetch_limit(100), 500);
+    assert_eq!(fetch_limit(5000), 500);
+}
+
+#[test]
+fn backoff_starts_at_two_seconds_and_caps_at_thirty() {
+    assert_eq!(next_backoff(Duration::ZERO), Duration::from_secs(2));
+    assert_eq!(next_backoff(Duration::from_secs(2)), Duration::from_secs(4));
     assert_eq!(
-        password_mode.credentials.as_ref().unwrap().password,
-        "secret"
+        next_backoff(Duration::from_secs(20)),
+        Duration::from_secs(30)
     );
-    assert!(password_mode.can_authenticate());
-
-    let token_mode = Target::from_account(&account, &stored, CredentialMode::Token);
-    assert!(token_mode.credentials.is_none());
-    assert!(!token_mode.allow_password);
-
-    let none_mode = Target::from_account(&account, &stored, CredentialMode::None);
-    assert!(none_mode.credentials.is_none());
+    assert_eq!(
+        next_backoff(Duration::from_secs(30)),
+        Duration::from_secs(30)
+    );
 }
 
 #[test]
-fn a_downgrade_drops_the_in_memory_password() {
-    let mut target = target(None, true);
-    assert!(target.can_authenticate());
-    target.set_allow_password(false);
-    assert!(target.credentials.is_none());
-    assert!(!target.can_authenticate());
+fn a_row_limit_command_is_adopted_and_forces_a_poll() {
+    let mut config = Config::default();
+    let mut targets = Vec::new();
+    let mut next_poll = Instant::now() + Duration::from_secs(60);
+    let mut force = false;
+    let mut probe = None;
+
+    apply_command(
+        Command::SetRowLimit(20),
+        &mut config,
+        &mut targets,
+        &mut next_poll,
+        &mut force,
+        &mut probe,
+        &mut DetailQueue::default(),
+    );
+    assert_eq!(config.row_limit, 20);
+    assert!(force);
+    assert!(probe.is_none());
 }
 
 #[test]
-fn backoff_doubles_up_to_the_cap() {
-    let mut wait = Duration::ZERO;
-    let mut seen = Vec::new();
-    for _ in 0..6 {
-        wait = next_backoff(wait);
-        seen.push(wait.as_secs());
-    }
-    assert_eq!(seen, vec![2, 4, 8, 16, 30, 30]);
+fn a_test_account_command_records_which_connection_to_probe() {
+    let mut config = Config::default();
+    let mut targets = Vec::new();
+    let mut next_poll = Instant::now();
+    let mut force = false;
+    let mut probe = None;
+
+    apply_command(
+        Command::TestAccount {
+            account: "a1".into(),
+        },
+        &mut config,
+        &mut targets,
+        &mut next_poll,
+        &mut force,
+        &mut probe,
+        &mut DetailQueue::default(),
+    );
+    assert_eq!(probe.as_deref(), Some("a1"));
+}
+
+#[test]
+fn replacing_the_targets_resets_the_probe_and_polls_immediately() {
+    let mut config = Config::default();
+    let mut targets = Vec::new();
+    let mut next_poll = Instant::now() + Duration::from_secs(60);
+    let mut force = false;
+    let mut probe = Some("a1".to_string());
+
+    let new_targets = vec![Target {
+        id: "a2".into(),
+        name: "a2".into(),
+        endpoint: "http://127.0.0.1:3425".into(),
+        key: None,
+    }];
+    apply_command(
+        Command::SetTargets(new_targets),
+        &mut config,
+        &mut targets,
+        &mut next_poll,
+        &mut force,
+        &mut probe,
+        &mut DetailQueue::default(),
+    );
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].id, "a2");
+    // A pending probe survives: replacing the poll list does not cancel a
+    // test the user already asked for.
+    assert_eq!(probe.as_deref(), Some("a1"));
+    assert!(force);
+}
+
+fn detail_request(nonce: u64) -> (DetailTicket, Box<Row>) {
+    let row = Row::from_record(&crate::model::UsageRecord {
+        route_id: Some(7),
+        ..Default::default()
+    })
+    .with_account("a1", "one");
+    let ticket = DetailTicket {
+        nonce,
+        revision: 0,
+        endpoint: "http://127.0.0.1:3425".into(),
+        identity: row.detail_identity(),
+    };
+    (ticket, Box::new(row))
+}
+
+#[test]
+fn detail_queue_is_bounded_latest_wins_and_does_not_force_poll_or_probe() {
+    let mut config = Config::default();
+    let mut targets = vec![Target {
+        id: "a1".into(),
+        name: "one".into(),
+        endpoint: "http://127.0.0.1:3425".into(),
+        key: None,
+    }];
+    let mut next = Instant::now() + Duration::from_secs(60);
+    let original = next;
+    let mut force = false;
+    let mut probe = Some("probe".into());
+    let mut queue = DetailQueue::default();
+    let (old, row) = detail_request(1);
+    apply_command(
+        Command::FetchDetail {
+            ticket: Box::new(old.clone()),
+            row,
+        },
+        &mut config,
+        &mut targets,
+        &mut next,
+        &mut force,
+        &mut probe,
+        &mut queue,
+    );
+    let (new, row) = detail_request(2);
+    apply_command(
+        Command::FetchDetail {
+            ticket: Box::new(new.clone()),
+            row,
+        },
+        &mut config,
+        &mut targets,
+        &mut next,
+        &mut force,
+        &mut probe,
+        &mut queue,
+    );
+    assert_eq!(queue.pending.as_ref().unwrap().0.nonce, 2);
+    assert!(!queue.accepts(&old, &targets));
+    assert!(queue.accepts(&new, &targets));
+    assert!(!force);
+    assert_eq!(next, original);
+    assert_eq!(probe.as_deref(), Some("probe"));
+    apply_command(
+        Command::CancelDetail,
+        &mut config,
+        &mut targets,
+        &mut next,
+        &mut force,
+        &mut probe,
+        &mut queue,
+    );
+    assert!(queue.pending.is_none());
+    assert!(!queue.accepts(&new, &targets));
+}
+
+#[test]
+fn target_changes_cancel_pending_and_inflight_detail_including_same_origin_edit() {
+    let mut config = Config::default();
+    let mut targets = vec![Target {
+        id: "a1".into(),
+        name: "one".into(),
+        endpoint: "http://127.0.0.1:3425".into(),
+        key: None,
+    }];
+    let mut next = Instant::now();
+    let mut force = false;
+    let mut probe = None;
+    let mut queue = DetailQueue::default();
+    let (old, row) = detail_request(1);
+    queue.enqueue(old.clone(), row, &targets);
+    let replacement = targets.clone();
+    apply_command(
+        Command::SetTargets(replacement),
+        &mut config,
+        &mut targets,
+        &mut next,
+        &mut force,
+        &mut probe,
+        &mut queue,
+    );
+    assert!(queue.pending.is_none());
+    assert!(!queue.accepts(&old, &targets));
+    assert_eq!(queue.revision, 1);
+    let (_, row) = detail_request(2);
+    queue.enqueue(old, row, &targets);
+    assert!(queue.pending.is_none());
+    let (mut current, row) = detail_request(3);
+    current.revision = 1;
+    queue.enqueue(current.clone(), row, &targets);
+    assert!(queue.accepts(&current, &targets));
+    targets.clear();
+    assert!(!queue.accepts(&current, &targets));
 }

@@ -67,10 +67,10 @@ pub fn parse_unix(iso: &str) -> Option<i64> {
             1
         };
         let tail = &rest[offset + 1..];
-        if tail.len() >= 5 {
-            if let (Ok(h), Ok(m)) = (tail[0..2].parse::<i64>(), tail[3..5].parse::<i64>()) {
-                seconds -= sign * (h * 3600 + m * 60);
-            }
+        if tail.len() >= 5
+            && let (Ok(h), Ok(m)) = (tail[0..2].parse::<i64>(), tail[3..5].parse::<i64>())
+        {
+            seconds -= sign * (h * 3600 + m * 60);
         }
     }
     Some(seconds)

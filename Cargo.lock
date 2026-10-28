@@ -3,18 +3,6 @@
 version = 4
 
 [[package]]
-name = "ah-panel"
-version = "0.2.0"
-dependencies = [
- "serde",
- "serde_json",
- "tracing",
- "tracing-subscriber",
- "ureq",
- "windows",
-]
-
-[[package]]
 name = "base64"
 version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -375,6 +363,18 @@ name = "log"
 version = "0.4.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
+
+[[package]]
+name = "magpie-panel"
+version = "0.3.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+ "ureq",
+ "windows",
+]
 
 [[package]]
 name = "memchr"

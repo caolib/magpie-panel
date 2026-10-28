@@ -1,18 +1,21 @@
-//! Wire types mirroring the AxonHub `GetRequests` GraphQL payload.
+//! Wire types for Magpie's usage log, and the paint-ready row built from them.
 //!
-//! Only the fields the panel actually renders are requested: a narrower
-//! selection keeps each poll cheap and removes any chance of a field drifting
-//! out of use unnoticed.
+//! Only the fields the panel renders are declared. Magpie's JSON is
+//! snake_case (`cache_read`, `ttft_ms`) with a few camelCase display names
+//! (`agentName`, `providerAccount`), so fields are mapped explicitly rather
+//! than through a `rename_all`.
 //!
-//! Field naming caveat: AxonHub uses `modelID`, which is not valid `camelCase`
-//! output of a `rename_all` conversion, so it needs an explicit `rename`.
-//! Getting this wrong fails silently — the value deserializes to `None`.
+//! Two semantics differ from the obvious reading and are handled here, not in
+//! the UI:
+//!
+//! * `in` excludes cache reads and writes; `out` already includes reasoning
+//!   tokens. Totals are derived rather than summed blindly.
+//! * `cost` is an *estimate* in USD, and `priced == false` means no price basis
+//!   was found. A zero cost is therefore not "free".
 
 use serde::Deserialize;
 
-/// Strips the vendor prefix from a model id: `openai/gpt-4o` -> `gpt-4o`.
-/// The part before the slash is the provider name, which the panel does not
-/// show; ids without a slash pass through unchanged.
+/// Strips the vendor prefix from a model id: `openai/gpt-5` -> `gpt-5`.
 pub fn short_model_name(model: &str) -> &str {
     match model.rsplit_once('/') {
         Some((_, name)) => name,
@@ -20,22 +23,20 @@ pub fn short_model_name(model: &str) -> &str {
     }
 }
 
-/// The model name the panel displays: the vendor prefix is stripped, then the
-/// user's abbreviations (`config.modelAliases`) are applied in order — every
-/// occurrence of an entry's `from` (compared case-insensitively) is replaced
-/// with its `to`, each rule working on the result of the previous one. So
-/// `deepseek` -> `ds` plus `flash` -> `f` turns `deepseek-v4.1-flash` into
-/// `ds-v4.1-f`. An empty `to` deletes the matches, so `deepseek-` -> `` turns
-/// `deepseek-v4.1-flash` into `v4.1-flash`.
-pub fn display_model_name(raw: &str, aliases: &[crate::config::ModelAlias]) -> String {
-    let mut current = short_model_name(raw).to_string();
+/// The model name the panel displays, with the user's abbreviations applied.
+pub fn display_model_name(raw: &str, aliases: &[crate::config::NameAlias]) -> String {
+    apply_aliases(short_model_name(raw), aliases)
+}
+
+/// Rewrite a display name with the user's abbreviations, in order. An empty
+/// `to` deletes every match; an empty `from` is skipped.
+pub fn apply_aliases(raw: &str, aliases: &[crate::config::NameAlias]) -> String {
+    let mut current = raw.to_string();
     if aliases.is_empty() || current.is_empty() {
         return current;
     }
     for alias in aliases {
         let from = alias.from.trim();
-        // `to` may be empty: it deletes the matches rather than replacing
-        // them. A blank `from` would match everywhere, so it is skipped.
         if from.is_empty() {
             continue;
         }
@@ -45,12 +46,6 @@ pub fn display_model_name(raw: &str, aliases: &[crate::config::ModelAlias]) -> S
 }
 
 /// Case-insensitive `from` -> `to` over every occurrence, without regex.
-///
-/// Matching walks bytes and compares with `eq_ignore_ascii_case`, which is
-/// safe on UTF-8: a needle starts with an ASCII byte or a UTF-8 lead byte,
-/// and both only occur at character boundaries, so a match can never begin
-/// (or end) inside a multi-byte character. Non-ASCII text simply compares
-/// byte-for-byte. A needle the haystack does not hold returns it unchanged.
 fn replace_all_ci(haystack: &str, from: &str, to: &str) -> String {
     let needle = from.as_bytes();
     if needle.is_empty() {
@@ -73,593 +68,699 @@ fn replace_all_ci(haystack: &str, from: &str, to: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|_| haystack.to_string())
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct Edge<T> {
-    pub node: Option<T>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Connection<T> {
-    /// AxonHub omits `edges` entirely for some nested connections; a
-    /// path-based default avoids the `T: Default` bound a unit `default` adds.
-    #[serde(default = "no_edges")]
-    pub edges: Vec<Edge<T>>,
-    pub total_count: Option<i64>,
-}
-
-fn no_edges<T>() -> Vec<Edge<T>> {
-    Vec::new()
-}
-
-impl<T> Connection<T> {
-    pub fn first(&self) -> Option<&T> {
-        self.edges.iter().find_map(|e| e.node.as_ref())
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct NamedRef {
-    pub name: Option<String>,
-}
-
-impl NamedRef {
-    /// A blank name is the same as none. Channel names go through this too.
-    pub fn non_empty_name(&self) -> Option<String> {
-        self.name
-            .as_deref()
-            .map(str::trim)
-            .filter(|n| !n.is_empty())
-            .map(str::to_string)
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CostItem {
-    pub item_code: String,
-    pub quantity: i64,
-    #[serde(deserialize_with = "decimal_amount")]
-    pub subtotal: f64,
-    #[serde(default, deserialize_with = "null_as_empty")]
-    pub tier_breakdown: Vec<TierCost>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TierCost {
-    pub up_to: Option<i64>,
-    pub units: i64,
-    #[serde(deserialize_with = "decimal_amount")]
-    pub subtotal: f64,
-}
-
-/// GraphQL Decimal accepts both a JSON number and a decimal string.
-fn decimal_amount<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Decimal {
-        Number(f64),
-        Text(String),
-    }
-    let value = match Decimal::deserialize(deserializer)? {
-        Decimal::Number(value) => value,
-        Decimal::Text(value) => value.parse::<f64>().map_err(serde::de::Error::custom)?,
-    };
-    if value.is_finite() && value >= 0.0 {
-        Ok(value)
-    } else {
-        Err(serde::de::Error::custom("invalid cost amount"))
-    }
-}
-
-fn null_as_empty<'de, T: Deserialize<'de>, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Vec<T>, D::Error> {
-    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
-}
-
-impl CostItem {
-    pub fn label(&self) -> &str {
-        match self.item_code.as_str() {
-            "prompt_tokens" => "输入",
-            "completion_tokens" => "输出",
-            "prompt_cached_tokens" => "缓存读取",
-            "prompt_write_cached_tokens" => "缓存写入",
-            "prompt_write_cached_tokens_5m" | "prompt_write_cached_tokens5m" => "缓存写入(5m)",
-            "prompt_write_cached_tokens_1h" | "prompt_write_cached_tokens1h" => "缓存写入(1h)",
-            _ => &self.item_code,
-        }
-    }
-
-    fn short_label(&self) -> &str {
-        match self.item_code.as_str() {
-            "prompt_tokens" => "入",
-            "completion_tokens" => "出",
-            "prompt_cached_tokens" => "读",
-            "prompt_write_cached_tokens" => "写",
-            "prompt_write_cached_tokens_5m" | "prompt_write_cached_tokens5m" => "写5m",
-            "prompt_write_cached_tokens_1h" | "prompt_write_cached_tokens1h" => "写1h",
-            _ => self.label(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UsageLog {
-    pub prompt_tokens: Option<i64>,
-    pub completion_tokens: Option<i64>,
-    pub completion_reasoning_tokens: Option<i64>,
-    pub total_tokens: Option<i64>,
-    pub prompt_cached_tokens: Option<i64>,
-    pub prompt_write_cached_tokens: Option<i64>,
-    /// Billed cost in the account's currency. AxonHub sends a JSON number,
-    /// which is a float even when the value is whole.
-    pub total_cost: Option<f64>,
-    #[serde(default, deserialize_with = "null_as_empty")]
-    pub cost_items: Vec<CostItem>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Execution {
-    #[serde(rename = "modelID")]
-    pub model_id: Option<String>,
-    #[serde(rename = "upstreamModelID")]
-    pub upstream_model_id: Option<String>,
-    #[serde(rename = "channelAPIKeyIndex")]
-    pub channel_api_key_index: Option<i64>,
-    pub status: Option<String>,
-    pub format: Option<String>,
-    pub reasoning_effort: Option<String>,
-    pub pass_through_applied: Option<bool>,
-    /// HTTP status the upstream provider answered this attempt with.
-    pub response_status_code: Option<i64>,
-    pub channel: Option<NamedRef>,
-}
-
-impl Default for Execution {
-    fn default() -> Self {
-        Execution {
-            model_id: None,
-            upstream_model_id: None,
-            channel_api_key_index: None,
-            status: None,
-            format: None,
-            reasoning_effort: None,
-            pass_through_applied: None,
-            response_status_code: None,
-            channel: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Request {
-    pub id: String,
-    pub created_at: Option<String>,
-    pub updated_at: Option<String>,
-    pub status: Option<String>,
-    #[serde(rename = "modelID")]
-    pub model_id: Option<String>,
-    pub format: Option<String>,
-    pub reasoning_effort: Option<String>,
-    pub stream: Option<bool>,
-    /// Where the request entered AxonHub (`api`, `playground`, …).
-    pub source: Option<String>,
-    /// `clientIP`, not `clientIp`: the acronym is spelled out in the schema.
-    #[serde(rename = "clientIP")]
-    pub client_ip: Option<String>,
-    #[serde(rename = "apiKey")]
-    pub api_key: Option<NamedRef>,
-    pub channel: Option<NamedRef>,
-    pub metrics_latency_ms: Option<i64>,
-    pub metrics_first_token_latency_ms: Option<i64>,
-    pub metrics_reasoning_duration_ms: Option<i64>,
-    pub executions: Option<Connection<Execution>>,
-    pub usage_logs: Option<Connection<UsageLog>>,
-}
-
-impl Default for Request {
-    fn default() -> Self {
-        Request {
-            id: String::new(),
-            created_at: None,
-            updated_at: None,
-            status: None,
-            model_id: None,
-            format: None,
-            reasoning_effort: None,
-            stream: None,
-            source: None,
-            client_ip: None,
-            api_key: None,
-            channel: None,
-            metrics_latency_ms: None,
-            metrics_first_token_latency_ms: None,
-            metrics_reasoning_duration_ms: None,
-            executions: None,
-            usage_logs: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct RequestsData {
-    pub requests: Connection<Request>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct Envelope<T> {
-    pub data: Option<T>,
+/// `GET /v1/magpie/usage/requests` response.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct UsagePage {
     #[serde(default)]
-    pub errors: Vec<GraphqlError>,
+    pub rows: Vec<UsageRecord>,
+    #[serde(default)]
+    pub total: Option<i64>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct GraphqlError {
-    pub message: String,
+/// One line of `usage.jsonl`, as the HTTP API reports it.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct UsageRecord {
+    /// Start time of the request (or of a handed-on attempt), RFC3339.
+    #[serde(default)]
+    pub t: Option<String>,
+    #[serde(default)]
+    pub agent: Option<String>,
+    #[serde(default, rename = "agentName")]
+    pub agent_name: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default, rename = "providerName")]
+    pub provider_name: Option<String>,
+    #[serde(default, rename = "providerAccount")]
+    pub provider_account: Option<String>,
+    #[serde(default, rename = "providerKeyName")]
+    pub provider_key_name: Option<String>,
+    /// Host the upstream call was sent to.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// `"/v1/messages → /v1/chat/completions"` when the protocol changed.
+    #[serde(default)]
+    pub ep: Option<String>,
+    /// The model the client asked for: a name, alias or routing group.
+    #[serde(default)]
+    pub req: Option<String>,
+    /// The upstream model actually selected.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// The model the provider's reply declared, when it said anything.
+    #[serde(default)]
+    pub served: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    /// Input tokens, excluding cache reads and writes.
+    #[serde(default, rename = "in")]
+    pub input: Option<i64>,
+    /// Output tokens, reasoning included.
+    #[serde(default)]
+    pub out: Option<i64>,
+    #[serde(default)]
+    pub cache_read: Option<i64>,
+    #[serde(default)]
+    pub cache_write: Option<i64>,
+    #[serde(default)]
+    pub reasoning: Option<i64>,
+    /// Whole-request duration, including earlier retries.
+    #[serde(default)]
+    pub ms: Option<i64>,
+    /// Time to first text, reasoning or tool-call content.
+    #[serde(default)]
+    pub ttft_ms: Option<i64>,
+    /// HTTP status recorded for the request. `0` is not a pending marker.
+    #[serde(default)]
+    pub status: Option<i64>,
+    #[serde(default)]
+    pub err: Option<String>,
+    #[serde(default)]
+    pub err_type: Option<String>,
+    #[serde(default)]
+    pub tries: Option<i64>,
+    /// This failed attempt was handed on to the next one; not a final result.
+    #[serde(default)]
+    pub handed_on: Option<bool>,
+    /// Shared by every attempt of one route; links live rows to finished ones.
+    #[serde(default)]
+    pub route_id: Option<i64>,
+    #[serde(default)]
+    pub rid: Option<String>,
+    #[serde(default)]
+    pub session: Option<String>,
+    /// Estimated USD cost.
+    #[serde(default)]
+    pub cost: Option<f64>,
+    /// Whether a price basis was found. `false` means `cost == 0` is unknown.
+    #[serde(default)]
+    pub priced: Option<bool>,
 }
 
-/// The channel an execution ran against, with the endpoint it dialled. The
-/// list query only needs a name; the detail popup is where `type`/`baseURL`
-/// matter, so they are fetched only for it.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ChannelDetail {
+/// Recent in-memory routes. No request/response bodies are declared or fetched.
+#[derive(Clone, Default, Deserialize)]
+pub struct TracePage {
+    #[serde(default)]
+    pub routes: Vec<Route>,
+}
+
+#[derive(Clone, Default, Deserialize)]
+pub struct Route {
+    pub id: i64,
+    /// Official Route calls its start time `time`, not Try's `start`.
+    #[serde(default)]
+    pub time: Option<String>,
+    #[serde(default)]
+    pub session: Option<String>,
+    #[serde(default)]
+    pub agent: Option<String>,
+    #[serde(default)]
+    pub done: Option<bool>,
+    #[serde(default)]
+    pub status: Option<i64>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub order: Vec<RouteCandidate>,
+    #[serde(default)]
+    pub tries: Vec<RouteTry>,
+}
+
+#[derive(Clone, Default, Deserialize)]
+pub struct RouteCandidate {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
     pub name: Option<String>,
-    #[serde(rename = "type")]
+    #[serde(default)]
+    pub who: Option<String>,
+    #[serde(default)]
     pub kind: Option<String>,
-    #[serde(rename = "baseURL")]
-    pub base_url: Option<String>,
 }
 
-/// One upstream attempt of a request. A failed request usually carries several
-/// — AxonHub retries the next channel — so the popup lists them all and the
-/// error is per execution, not per request.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Default, Deserialize)]
+pub struct RouteTry {
+    /// Candidate identifier, NOT a gateway or upstream credential.
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub start: Option<String>,
+    #[serde(default)]
+    pub done: Option<bool>,
+    #[serde(default)]
+    pub status: Option<i64>,
+    #[serde(default)]
+    pub fail: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// Identity is based exclusively on wire fields, never display aliases.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetailIdentity {
+    pub account_id: String,
+    pub route_id: Option<i64>,
+    pub timestamp: Option<String>,
+    pub row_id: String,
+    pub provider_id: Option<String>,
+    pub provider_account: Option<String>,
+    pub provider_key_name: Option<String>,
+    pub rid: Option<String>,
+    pub session: Option<String>,
+    pub handed_on: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetailTicket {
+    pub nonce: u64,
+    /// Incremented on connection/credential edits, including same-origin edits.
+    pub revision: u64,
+    pub endpoint: String,
+    pub identity: DetailIdentity,
+}
+
+impl DetailTicket {
+    pub fn accepts(&self, incoming: &Self, revision: u64, endpoint: Option<&str>) -> bool {
+        self == incoming && self.revision == revision && endpoint == Some(self.endpoint.as_str())
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct Attempt {
+    pub model: String,
+    pub done: Option<bool>,
+    pub status_code: Option<i64>,
+    pub fail: Option<String>,
+    pub error: Option<String>,
+    pub error_type: Option<String>,
+    pub provider: Option<String>,
+    pub provider_key: Option<String>,
+    pub handed_on: bool,
+}
+
+impl Attempt {
+    pub fn from_record(record: &UsageRecord) -> Self {
+        let row = Row::from_record(record);
+        Self {
+            model: row.model,
+            done: Some(true),
+            status_code: row.status_code,
+            error: row.error,
+            error_type: row.error_type,
+            provider: row.provider,
+            provider_key: row.provider_key,
+            handed_on: row.handed_on,
+            ..Self::default()
+        }
+    }
+}
+
+#[derive(Clone)]
+pub enum DetailSource {
+    Loading,
+    Trace,
+    History,
+    Unavailable,
+}
+
+#[derive(Clone)]
 pub struct ExecutionDetail {
-    #[serde(skip)]
-    pub channel_key_label: Option<String>,
-    pub created_at: Option<String>,
-    pub updated_at: Option<String>,
-    #[serde(rename = "modelID")]
-    pub model_id: Option<String>,
-    #[serde(rename = "upstreamModelID")]
-    pub upstream_model_id: Option<String>,
-    #[serde(rename = "channelAPIKeyIndex")]
-    pub channel_api_key_index: Option<i64>,
-    pub format: Option<String>,
-    pub reasoning_effort: Option<String>,
-    pub pass_through_applied: Option<bool>,
-    pub status: Option<String>,
-    pub response_status_code: Option<i64>,
-    pub error_message: Option<String>,
-    /// `requestURL`, not `requestUrl`: the acronym is spelled out in the
-    /// schema, and a wrong rename fails silently (see the module header).
-    #[serde(rename = "requestURL")]
-    pub request_url: Option<String>,
-    pub channel: Option<ChannelDetail>,
-    pub metrics_first_token_latency_ms: Option<i64>,
-    pub metrics_reasoning_duration_ms: Option<i64>,
+    pub source: DetailSource,
+    pub attempts: Vec<Attempt>,
+    pub route_error: Option<String>,
+    pub route_status: Option<i64>,
+    /// Always visible and copyable, including pagination/cache limitations.
+    pub notice: String,
 }
 
 impl ExecutionDetail {
-    pub fn status(&self) -> Status {
-        Status::parse(self.status.as_deref())
+    pub fn loading() -> Self {
+        Self {
+            source: DetailSource::Loading,
+            attempts: Vec::new(),
+            route_error: None,
+            route_status: None,
+            notice: "正在加载尝试记录…".into(),
+        }
+    }
+
+    pub fn unavailable(reason: impl Into<String>) -> Self {
+        Self {
+            source: DetailSource::Unavailable,
+            attempts: Vec::new(),
+            route_error: None,
+            route_status: None,
+            notice: format!("尝试日志不可用：{}", reason.into()),
+        }
+    }
+
+    pub fn from_route(route: &Route, row: &Row) -> Self {
+        // Do NOT deduplicate by model, key or candidate id: retries may repeat all three.
+        let attempts: Vec<_> = route
+            .tries
+            .iter()
+            .map(|attempt| {
+                let candidate = route
+                    .order
+                    .iter()
+                    .find(|c| !attempt.id.is_empty() && c.id == attempt.id);
+                Attempt {
+                    model: attempt.model.clone().unwrap_or_default(),
+                    done: attempt.done,
+                    status_code: attempt.status,
+                    fail: attempt.fail.clone(),
+                    error: attempt.error.clone(),
+                    provider: candidate.and_then(|c| {
+                        non_empty(c.name.as_deref()).or_else(|| non_empty(c.provider.as_deref()))
+                    }),
+                    provider_key: candidate
+                        .filter(|c| c.kind.as_deref() == Some("key"))
+                        .and_then(|c| non_empty(c.who.as_deref())),
+                    ..Attempt::default()
+                }
+            })
+            .collect();
+        let incomplete = route.done != Some(true) || attempts.len() < row.tries as usize;
+        Self {
+            source: DetailSource::Trace,
+            attempts,
+            route_error: route.error.clone(),
+            route_status: route.status,
+            notice: if incomplete {
+                "近期缓存尝试记录（请求未结束或记录不完整）"
+            } else {
+                "近期缓存尝试记录（非原始 HTTP 响应正文）"
+            }
+            .into(),
+        }
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RequestWithExecutions {
-    pub executions: Option<Connection<ExecutionDetail>>,
+/// Popup-owned state with pure acceptance and poll-refresh rules.
+pub struct DetailSession {
+    pub raw_row: Row,
+    pub ticket: DetailTicket,
+    pub detail: ExecutionDetail,
 }
 
-/// Answer to the `GetRequestExecutions` query: `node(id:)` resolves to the
-/// request, whose `executions` connection carries the attempts.
-#[derive(Debug, Clone, Deserialize)]
-pub struct DetailData {
-    pub node: Option<RequestWithExecutions>,
+impl DetailSession {
+    pub fn new(raw_row: Row, ticket: DetailTicket) -> Self {
+        Self {
+            raw_row,
+            ticket,
+            detail: ExecutionDetail::loading(),
+        }
+    }
+    pub fn refresh(&mut self, rows: &[Row]) {
+        if let Some(row) = rows
+            .iter()
+            .find(|row| row.detail_identity() == self.ticket.identity)
+        {
+            self.raw_row = row.clone(); // preserve the fetched attempts
+        }
+    }
+    pub fn receive(
+        &mut self,
+        ticket: &DetailTicket,
+        detail: ExecutionDetail,
+        revision: u64,
+        endpoint: Option<&str>,
+    ) -> bool {
+        if !self.ticket.accepts(ticket, revision, endpoint) {
+            return false;
+        }
+        self.detail = detail;
+        true
+    }
 }
 
-fn non_empty_owned(value: Option<&str>) -> Option<String> {
+/// Compare instants at the ledger's seconds precision; retain the original
+/// timestamp in identities to distinguish separate ledger rows.
+fn same_instant(a: Option<&str>, b: Option<&str>) -> bool {
+    match (
+        a.and_then(crate::time::parse_unix),
+        b.and_then(crate::time::parse_unix),
+    ) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
+
+impl Route {
+    pub fn matches(&self, row: &Row) -> bool {
+        if row.route_id != Some(self.id) {
+            return false;
+        }
+        if let Some(session) = row.session.as_deref()
+            && self.session.as_deref() != Some(session)
+        {
+            return false;
+        }
+        if let Some(agent) = row.agent_id.as_deref()
+            && self.agent.as_deref() != Some(agent)
+        {
+            return false;
+        }
+        same_instant(self.time.as_deref(), row.started_at.as_deref())
+            || self
+                .tries
+                .iter()
+                .any(|t| same_instant(t.start.as_deref(), row.started_at.as_deref()))
+    }
+}
+
+/// Require the selected ledger row as an anchor before accepting a route
+/// summary; a reused integer route id from another day must not join history.
+pub fn history_anchor(record: &UsageRecord, row: &Row) -> bool {
+    Row::from_record(record)
+        .with_account(&row.account_id, &row.account_name)
+        .detail_identity()
+        == row.detail_identity()
+}
+
+/// `GET /v1/magpie/concurrency` response; only `active` is used.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Concurrency {
+    #[serde(default)]
+    pub active: Vec<ActiveRequest>,
+}
+
+/// One in-flight request. Field names are the client's, not the upstream
+/// model's: `model` is what the agent asked for, `provider` the initial route.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ActiveRequest {
+    #[serde(default)]
+    pub id: Option<i64>,
+    #[serde(default)]
+    pub agent: Option<String>,
+    #[serde(default)]
+    pub started: Option<String>,
+    #[serde(default)]
+    pub ms: Option<i64>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub session: Option<String>,
+    /// Matches a finished row's `route_id`.
+    #[serde(default)]
+    pub route: Option<i64>,
+}
+
+fn non_empty(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .map(str::to_string)
 }
 
-/// Collapse a wire format string (`openai/chat_completions`,
-/// `anthropic/messages`, …) to the short badge shown on the card.
-fn normalize_format(f: &str) -> String {
-    if f.contains("chat") {
-        "chat".into()
-    } else if f.contains("responses") {
-        "resp".into()
-    } else if f.contains("messages") {
-        "mess".into()
-    } else {
-        f.into()
-    }
-}
-
-/// A single row, pre-resolved so painting never walks the wire types.
+/// A single table row, pre-resolved so painting never walks the wire types.
 #[derive(Debug, Clone)]
 pub struct Row {
-    /// Full GUID, e.g. `gid://axonhub/Request/33188`.
+    /// A display key: Magpie has no universal request id, so it is built from
+    /// the fields its own UI keeps a row under.
     pub id: String,
-    /// Which saved account the row came from. Empty in a single-account setup,
-    /// where there is nothing to tell apart.
+    /// Which saved connection the row came from.
     pub account_id: String,
     pub account_name: String,
-    pub created_at: Option<String>,
-    pub updated_at: Option<String>,
+    pub started_at: Option<String>,
     pub status: Status,
+    pub status_code: Option<i64>,
+    pub error: Option<String>,
+    pub error_type: Option<String>,
+    /// Raw agent id, never rewritten by display aliases.
+    pub agent_id: Option<String>,
+    /// What the client asked for (`req`).
+    pub requested_model: String,
+    /// The upstream model actually selected (`model`).
     pub model: String,
-    /// Execution model when AxonHub routed to a model other than the request.
-    pub routed_model: Option<String>,
-    /// Raw model reported upstream, before AxonHub rewrites it for the client.
-    pub upstream_model: Option<String>,
-    pub channel: Option<String>,
-    /// Zero-based index of the channel credential used by the latest attempt.
-    pub channel_api_key_index: Option<i64>,
-    /// Resolved display label, filled when rebuilding the account's rows.
-    pub channel_key_label: Option<String>,
-    /// Name of the API key the request arrived with.
-    pub caller: Option<String>,
-    /// Where the request entered (`api`, `playground`, …).
-    pub source: Option<String>,
-    /// Client address recorded on the request.
-    pub client_ip: Option<String>,
-    pub format: Option<String>,
+    /// The model the reply declared (`served`), when present.
+    pub served_model: Option<String>,
+    /// The provider's display name, falling back to its id.
+    pub provider: Option<String>,
+    /// The raw provider id, used for filtering.
+    pub provider_id: Option<String>,
+    /// Immutable display-name fallback for detail identity when id is absent.
+    pub raw_provider: Option<String>,
+    pub provider_account: Option<String>,
+    pub provider_key: Option<String>,
+    /// The agent's display name, falling back to its id.
+    pub agent: Option<String>,
+    pub host: Option<String>,
+    /// Client endpoint, e.g. `/v1/messages → /v1/responses`.
+    pub endpoint: Option<String>,
     pub reasoning_effort: Option<String>,
-    /// Wire protocol used upstream; compared against `format` to show whether a
-    /// conversion happened in flight.
-    pub upstream_format: Option<String>,
-    pub pass_through: bool,
-    pub stream: bool,
+    /// Attempts recorded for the final request; above one means retries.
+    pub tries: i64,
+    /// This row is a failed attempt handed on to the next one.
+    pub handed_on: bool,
+    pub route_id: Option<i64>,
+    pub rid: Option<String>,
+    pub session: Option<String>,
+    /// Input tokens, excluding cache reads and writes.
+    pub prompt_tokens: i64,
+    pub cached_tokens: i64,
+    pub write_cached_tokens: i64,
+    /// Output tokens, reasoning included.
+    pub completion_tokens: i64,
+    pub reasoning_tokens: i64,
     pub latency_ms: Option<i64>,
     pub first_token_ms: Option<i64>,
-    pub reasoning_ms: Option<i64>,
-    pub prompt_tokens: i64,
-    pub completion_tokens: i64,
-    /// Reasoning tokens included in `completion_tokens`.
-    pub reasoning_tokens: i64,
-    pub total_tokens: i64,
-    pub cached_tokens: i64,
-    /// Tokens written into the prompt cache on this request.
-    pub write_cached_tokens: i64,
-    /// Billed cost. `None` when the usage log has not arrived yet.
+    /// Estimated USD cost; `None` when no price basis was found.
     pub total_cost: Option<f64>,
-    pub cost_items: Vec<CostItem>,
-    /// Number of upstream attempts; above one means retries happened.
-    pub attempt_count: i64,
-    /// How many of the fetched attempts did not succeed. A request that ended
-    /// well can still carry failures here, which is what makes its detail worth
-    /// opening.
-    pub failed_attempts: i64,
-    /// Whether `failed_attempts` may be incomplete: the list query caps
-    /// `executions` at the first 10, so a request with more attempts than that
-    /// could hide failures beyond what we fetched. When true, `is_error()` is
-    /// conservatively true so the card still opens the detail popup.
-    pub attempts_truncated: bool,
-    /// HTTP status the newest failed attempt was answered with. Shown in the
-    /// table's cache column when the request has no cache rate to show — a
-    /// failed request is read for its reason, not for its cache.
-    pub error_status_code: Option<i64>,
+    /// In flight right now, taken from `/v1/magpie/concurrency`.
+    pub live: bool,
 }
 
 impl Row {
-    pub fn from_wire(req: &Request) -> Self {
-        let execution = req.executions.as_ref().and_then(Connection::first);
-        let usage = req.usage_logs.as_ref().and_then(Connection::first);
-
-        let requested_model = req.model_id.clone().unwrap_or_default();
-        let routed_model = execution
-            .and_then(|e| e.model_id.clone())
-            .filter(|m| !m.is_empty() && *m != requested_model);
-
-        // The page prefers the final execution's channel, falling back to the
-        // request-level channel before any execution has been recorded.
-        let channel = execution
-            .and_then(|e| e.channel.as_ref())
-            .or(req.channel.as_ref())
-            .and_then(NamedRef::non_empty_name);
-
-        Row {
-            id: req.id.clone(),
-            // Filled in by whoever polled the request: `from_wire` sees one
-            // account's payload and has no idea which login it belongs to.
-            account_id: String::new(),
-            account_name: String::new(),
-            created_at: req.created_at.clone(),
-            updated_at: req.updated_at.clone(),
-            status: Status::parse(req.status.as_deref()),
-            model: requested_model,
-            routed_model,
-            upstream_model: execution.and_then(|e| non_empty_owned(e.upstream_model_id.as_deref())),
-            channel,
-            channel_api_key_index: execution.and_then(|e| e.channel_api_key_index),
-            channel_key_label: None,
-            caller: req.api_key.as_ref().and_then(NamedRef::non_empty_name),
-            source: non_empty_owned(req.source.as_deref()),
-            client_ip: non_empty_owned(req.client_ip.as_deref()),
-            // The inbound protocol is the request's own; the upstream one is
-            // what the execution actually spoke.
-            format: req
-                .format
+    pub fn detail_identity(&self) -> DetailIdentity {
+        DetailIdentity {
+            account_id: self.account_id.clone(),
+            route_id: self.route_id,
+            timestamp: self.started_at.clone(),
+            row_id: self.id.clone(),
+            provider_id: self
+                .provider_id
                 .clone()
-                .or_else(|| execution.and_then(|e| e.format.clone()))
-                .filter(|f| !f.is_empty())
-                .map(|f| normalize_format(&f)),
-            upstream_format: execution
-                .and_then(|e| e.format.clone())
-                .filter(|f| !f.is_empty())
-                .map(|f| normalize_format(&f)),
-            pass_through: execution
-                .and_then(|e| e.pass_through_applied)
-                .unwrap_or(false),
-            reasoning_effort: execution
-                .and_then(|e| e.reasoning_effort.clone())
-                .or_else(|| req.reasoning_effort.clone())
-                .filter(|r| !r.is_empty()),
-            stream: req.stream.unwrap_or(false),
-            latency_ms: req.metrics_latency_ms,
-            first_token_ms: req.metrics_first_token_latency_ms,
-            reasoning_ms: req.metrics_reasoning_duration_ms,
-            prompt_tokens: usage.and_then(|u| u.prompt_tokens).unwrap_or(0),
-            completion_tokens: usage.and_then(|u| u.completion_tokens).unwrap_or(0),
-            reasoning_tokens: usage
-                .and_then(|u| u.completion_reasoning_tokens)
-                .unwrap_or(0),
-            total_tokens: usage.and_then(|u| u.total_tokens).unwrap_or(0),
-            cached_tokens: usage.and_then(|u| u.prompt_cached_tokens).unwrap_or(0),
-            write_cached_tokens: usage
-                .and_then(|u| u.prompt_write_cached_tokens)
-                .unwrap_or(0),
-            total_cost: usage.and_then(|u| u.total_cost).filter(|c| *c > 0.0),
-            cost_items: usage.map(|u| u.cost_items.clone()).unwrap_or_default(),
-            attempt_count: req
-                .executions
-                .as_ref()
-                .and_then(|c| c.total_count)
-                .unwrap_or(0),
-            failed_attempts: req
-                .executions
-                .as_ref()
-                .map(|c| {
-                    c.edges
-                        .iter()
-                        .filter_map(|e| e.node.as_ref())
-                        .filter(|e| {
-                            matches!(
-                                Status::parse(e.status.as_deref()),
-                                Status::Failed | Status::Canceled
-                            )
-                        })
-                        .count() as i64
-                })
-                .unwrap_or(0),
-            // `attempt_count` is the connection's true total, while the edges we
-            // inspect are capped at the first 10. If the total exceeds what we
-            // actually received, some attempts (and their failures) are unseen.
-            attempts_truncated: req
-                .executions
-                .as_ref()
-                .map(|c| c.total_count.unwrap_or(0) > c.edges.len() as i64)
-                .unwrap_or(false),
-            // Attempts arrive newest first, so this is the code of the latest
-            // failed attempt that carries one: what the request ended with, or
-            // the last error seen before it was canceled. A failed attempt
-            // without a code (a timeout, a cancellation) is skipped rather
-            // than blanking the cell.
-            error_status_code: req.executions.as_ref().and_then(|c| {
-                c.edges
-                    .iter()
-                    .filter_map(|e| e.node.as_ref())
-                    .filter(|e| {
-                        matches!(
-                            Status::parse(e.status.as_deref()),
-                            Status::Failed | Status::Canceled
-                        )
-                    })
-                    .find_map(|e| e.response_status_code)
-            }),
+                .or_else(|| self.raw_provider.clone()),
+            provider_account: self.provider_account.clone(),
+            provider_key_name: self.provider_key.clone(),
+            rid: self.rid.clone(),
+            session: self.session.clone(),
+            handed_on: self.handed_on,
         }
     }
 
-    /// Compact per-category amounts; separate from the request's total cost.
-    pub fn cost_breakdown_text(&self) -> Option<String> {
-        let parts: Vec<String> = self
-            .cost_items
-            .iter()
-            .filter(|item| item.quantity > 0 || item.subtotal > 0.0)
-            .map(|item| {
-                format!(
-                    "{} {}",
-                    item.short_label(),
-                    crate::format::cost(item.subtotal)
-                )
-            })
-            .collect();
-        (!parts.is_empty()).then(|| parts.join(" · "))
+    /// Call only on a raw row. Shared by the list and detail so aliases are
+    /// never applied twice, and updates can reapply the current configuration.
+    pub fn for_display(&self, config: &crate::config::Config) -> Self {
+        let mut row = self.clone();
+        if !config.model_aliases.is_empty() {
+            row.requested_model = display_model_name(&row.requested_model, &config.model_aliases);
+            row.model = display_model_name(&row.model, &config.model_aliases);
+            row.served_model = row
+                .served_model
+                .map(|s| display_model_name(&s, &config.model_aliases));
+        }
+        row.provider = row
+            .provider
+            .map(|p| apply_aliases(&p, &config.provider_aliases));
+        row.agent = row.agent.map(|a| apply_aliases(&a, &config.agent_aliases));
+        row
     }
 
-    /// Stamp the row with the account it was polled from, once the caller
-    /// knows which login produced it.
+    /// `provider(key)`: the provider with Magpie's upstream key name appended,
+    /// so one table cell carries both. Either side may be missing.
+    pub fn provider_with_key(&self) -> Option<String> {
+        match (self.provider.as_deref(), self.provider_key.as_deref()) {
+            (Some(provider), Some(key)) => Some(format!("{provider}({key})")),
+            (Some(provider), None) => Some(provider.to_string()),
+            (None, Some(key)) => Some(format!("({key})")),
+            (None, None) => None,
+        }
+    }
+
+    pub fn from_record(record: &UsageRecord) -> Self {
+        let failed = record.status.is_some_and(|code| code >= 400)
+            || record.err.as_deref().is_some_and(|e| !e.trim().is_empty())
+            || record
+                .err_type
+                .as_deref()
+                .is_some_and(|e| !e.trim().is_empty())
+            || record.handed_on.unwrap_or(false);
+        let requested = non_empty(record.req.as_deref())
+            .or_else(|| non_empty(record.model.as_deref()))
+            .unwrap_or_default();
+        let model = non_empty(record.model.as_deref()).unwrap_or_default();
+        let id = row_key(
+            record.t.as_deref(),
+            record.agent.as_deref(),
+            record.model.as_deref(),
+            record.rid.as_deref(),
+            record.session.as_deref(),
+        );
+        Row {
+            id,
+            account_id: String::new(),
+            account_name: String::new(),
+            started_at: record.t.clone(),
+            status: if failed {
+                Status::Failed
+            } else {
+                Status::Completed
+            },
+            status_code: record.status,
+            error: record.err.clone().filter(|e| !e.trim().is_empty()),
+            error_type: non_empty(record.err_type.as_deref()),
+            agent_id: non_empty(record.agent.as_deref()),
+            requested_model: requested,
+            model,
+            served_model: non_empty(record.served.as_deref()),
+            provider: non_empty(record.provider_name.as_deref())
+                .or_else(|| non_empty(record.provider.as_deref())),
+            provider_id: non_empty(record.provider.as_deref()),
+            raw_provider: non_empty(record.provider_name.as_deref()),
+            provider_account: non_empty(record.provider_account.as_deref()),
+            provider_key: non_empty(record.provider_key_name.as_deref()),
+            agent: non_empty(record.agent_name.as_deref())
+                .or_else(|| non_empty(record.agent.as_deref())),
+            host: non_empty(record.host.as_deref()),
+            endpoint: non_empty(record.ep.as_deref()),
+            reasoning_effort: non_empty(record.effort.as_deref()),
+            tries: record.tries.unwrap_or(1).max(1),
+            handed_on: record.handed_on.unwrap_or(false),
+            route_id: record.route_id,
+            rid: non_empty(record.rid.as_deref()),
+            session: non_empty(record.session.as_deref()),
+            prompt_tokens: record.input.unwrap_or(0).max(0),
+            cached_tokens: record.cache_read.unwrap_or(0).max(0),
+            write_cached_tokens: record.cache_write.unwrap_or(0).max(0),
+            completion_tokens: record.out.unwrap_or(0).max(0),
+            reasoning_tokens: record.reasoning.unwrap_or(0).max(0),
+            latency_ms: record.ms.filter(|ms| *ms >= 0),
+            first_token_ms: record.ttft_ms.filter(|ms| *ms >= 0),
+            total_cost: record
+                .cost
+                .filter(|c| c.is_finite() && *c >= 0.0)
+                .filter(|_| record.priced.unwrap_or(false)),
+            live: false,
+        }
+    }
+
+    /// A request still in flight. The concurrency feed carries no tokens or
+    /// cost, so those stay at zero.
+    pub fn from_active(active: &ActiveRequest) -> Self {
+        let model = non_empty(active.model.as_deref()).unwrap_or_default();
+        let id = match (active.route, active.id) {
+            (Some(route), _) => format!("live:{route}"),
+            (None, Some(id)) => format!("live:{id}"),
+            (None, None) => format!("live:{}", model),
+        };
+        Row {
+            id,
+            account_id: String::new(),
+            account_name: String::new(),
+            started_at: active.started.clone(),
+            status: Status::Processing,
+            status_code: None,
+            error: None,
+            error_type: None,
+            agent_id: non_empty(active.agent.as_deref()),
+            requested_model: model.clone(),
+            model,
+            served_model: None,
+            provider: non_empty(active.provider.as_deref()),
+            provider_id: non_empty(active.provider.as_deref()),
+            raw_provider: non_empty(active.provider.as_deref()),
+            provider_account: None,
+            provider_key: None,
+            agent: non_empty(active.agent.as_deref()),
+            host: None,
+            endpoint: None,
+            reasoning_effort: None,
+            tries: 0,
+            handed_on: false,
+            route_id: active.route,
+            rid: None,
+            session: non_empty(active.session.as_deref()),
+            prompt_tokens: 0,
+            cached_tokens: 0,
+            write_cached_tokens: 0,
+            completion_tokens: 0,
+            reasoning_tokens: 0,
+            latency_ms: active.ms,
+            first_token_ms: None,
+            total_cost: None,
+            live: true,
+        }
+    }
+
+    /// Stamp the row with the connection it was polled from.
     pub fn with_account(mut self, id: &str, name: &str) -> Self {
         self.account_id = id.to_string();
         self.account_name = name.to_string();
         self
     }
 
-    /// Cache hit rate over the prompt, mirroring the requests page rule.
+    /// Total prompt tokens: input plus cached reads and writes, which Magpie
+    /// reports separately.
+    pub fn prompt_total(&self) -> i64 {
+        self.prompt_tokens + self.cached_tokens + self.write_cached_tokens
+    }
+
+    /// Everything the request moved, in tokens.
+    pub fn total_tokens(&self) -> i64 {
+        self.prompt_total() + self.completion_tokens
+    }
+
+    /// Cache hit rate over the prompt.
     pub fn cache_hit_rate(&self) -> Option<f64> {
-        if self.cached_tokens <= 0 || self.prompt_tokens <= 0 {
+        let prompt = self.prompt_total();
+        if self.cached_tokens <= 0 || prompt <= 0 {
             return None;
         }
-        // Clamped so a rate above 100% — which would only read as a bug —
-        // cannot reach the card.
-        Some((self.cached_tokens as f64 / self.prompt_tokens as f64 * 100.0).min(100.0))
+        Some((self.cached_tokens as f64 / prompt as f64 * 100.0).min(100.0))
     }
 
-    /// The page flags a weak hit rate only for sizeable prompts.
+    /// Flags a weak hit rate only for sizeable prompts.
     pub fn cache_hit_is_low(&self) -> bool {
-        matches!(self.cache_hit_rate(), Some(r) if r < 80.0 && self.prompt_tokens >= 40_000)
+        matches!(self.cache_hit_rate(), Some(r) if r < 80.0 && self.prompt_total() >= 40_000)
     }
 
-    /// Output throughput: output tokens per second of generation time.
-    /// Excludes prompt processing (TTFT) so the number reflects the model's
-    /// actual decoding speed, not the prompt length.
+    /// Output throughput over generation time. `out` includes reasoning, so it
+    /// is used as-is; TTFT is subtracted because it is prompt processing.
     pub fn tps(&self) -> Option<f64> {
         let ms = self.latency_ms?;
-        if ms <= 0 {
-            return None;
-        }
-        let output = (self.total_tokens - self.prompt_tokens).max(0);
-        if output <= 0 {
+        if ms <= 0 || self.completion_tokens <= 0 {
             return None;
         }
         let gen_ms = (ms - self.first_token_ms.unwrap_or(0)).max(1);
-        Some(output as f64 / (gen_ms as f64 / 1000.0))
+        Some(self.completion_tokens as f64 / (gen_ms as f64 / 1000.0))
     }
 
-    /// The model that actually served the request. When AxonHub routed to a
-    /// different model than the client asked for, the served one is what the
-    /// card shows; the caller marks it with `is_routed()`.
+    /// The model that actually served the request.
     pub fn served_model(&self) -> &str {
-        match &self.routed_model {
-            Some(routed) => short_model_name(routed),
-            None if self.model.is_empty() => "未知模型",
-            None => short_model_name(&self.model),
+        if self.model.is_empty() {
+            "未知模型"
+        } else {
+            short_model_name(&self.model)
         }
     }
 
-    /// Whether the request was served by a model other than the one requested.
+    /// Whether the request was served by a model other than the one asked for.
     pub fn is_routed(&self) -> bool {
-        self.routed_model.is_some()
+        !self.requested_model.is_empty()
+            && !self.model.is_empty()
+            && self.requested_model != self.model
     }
 
-    /// Whether the request has anything worth explaining, i.e. whether its card
-    /// opens the detail popup: it failed or was canceled, or it only succeeded
-    /// after an attempt failed. Walking the retries is the point of the popup,
-    /// so a request that recovered is as interesting as one that did not.
-    pub fn is_error(&self) -> bool {
-        matches!(self.status, Status::Failed | Status::Canceled)
-            || self.failed_attempts > 0
-            // Failures may sit beyond the first 10 attempts we fetched, so when
-            // the attempt count is truncated we cannot prove the detail is empty
-            // — open it rather than risk hiding a retry.
-            || self.attempts_truncated
-    }
-
-    /// The served model with its reasoning effort, e.g. `glm-5.2(max)`. When the
-    /// served model differs from the requested one, it is wrapped in [] instead
-    /// of recoloured so the distinction is unambiguous.
+    /// The served model with its effort, e.g. `gpt-5.2(high)`. A routed model
+    /// is wrapped in brackets so the distinction is unambiguous.
     pub fn display_model(&self) -> String {
         let model = self.served_model();
         match (&self.reasoning_effort, self.is_routed()) {
@@ -670,74 +771,90 @@ impl Row {
         }
     }
 
-    /// How the inbound and upstream protocols relate, for the card's protocol
-    /// cell. A missing side means "unknown", never "same".
+    /// How the inbound and upstream endpoints relate, for the protocol cell.
     pub fn protocol(&self) -> Protocol {
-        match (self.format.as_deref(), self.upstream_format.as_deref()) {
-            (Some(i), Some(u)) if i != u => Protocol::Converted {
-                from: i.to_string(),
-                to: u.to_string(),
-            },
-            (Some(i), Some(_)) => Protocol::Same(i.to_string()),
-            (Some(one), None) | (None, Some(one)) => Protocol::Single(one.to_string()),
+        let (inbound, upstream) = split_endpoint(self.endpoint.as_deref());
+        match (inbound, upstream) {
+            (Some(i), Some(u)) if i != u => Protocol::Converted { from: i, to: u },
+            (Some(i), Some(_)) => Protocol::Same(i),
+            (Some(one), None) | (None, Some(one)) => Protocol::Single(one),
             (None, None) => Protocol::Unknown,
         }
     }
 
-    /// Sort key for the merged list: the request's start time in Unix seconds.
-    /// Rows without a parsable timestamp sort last, since their age is unknown.
+    /// Whether the row opens the detail popup: failures carry a reason worth
+    /// reading, and a recovered retry is as interesting as a hard failure.
+    pub fn is_error(&self) -> bool {
+        self.status == Status::Failed || self.tries > 1 || self.handed_on
+    }
+
+    /// Sort key: the request's start time in Unix seconds.
     pub fn age_key(&self) -> i64 {
-        self.created_at
+        self.started_at
             .as_deref()
             .and_then(crate::time::parse_unix)
             .unwrap_or(i64::MIN)
     }
 }
 
-/// Deep link to a request's detail page.
-///
-/// The route matches the whole GUID as a single path segment, so it must be
-/// percent-encoded:
-///
-/// ```text
-/// /project/requests/gid%3A%2F%2Faxonhub%2FRequest%2F34009
-/// ```
-///
-/// Passing the bare number instead lands on the router's not-found page, which
-/// reports "guid must start with gid://axonhub/".
-pub fn request_url(endpoint: &str, id: &str) -> String {
-    format!(
-        "{}/project/requests/{}",
-        endpoint.trim_end_matches('/'),
-        encode_path_segment(id)
-    )
+/// The key Magpie's own UI keeps a row under. It is not guaranteed unique
+/// server-side, which is why it is only ever compared, never trusted alone.
+fn row_key(
+    t: Option<&str>,
+    agent: Option<&str>,
+    model: Option<&str>,
+    rid: Option<&str>,
+    session: Option<&str>,
+) -> String {
+    [
+        t.unwrap_or_default(),
+        agent.unwrap_or_default(),
+        model.unwrap_or_default(),
+        rid.unwrap_or_default(),
+        session.unwrap_or_default(),
+    ]
+    .join("|")
 }
 
-/// Percent-encode every byte outside the RFC 3986 unreserved set, so a GUID
-/// becomes a valid single path segment (`:` and `/` are the ones that matter).
-fn encode_path_segment(value: &str) -> String {
-    let mut out = String::with_capacity(value.len() + 16);
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                out.push(byte as char);
-            }
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
+/// Split `"/v1/messages → /v1/chat/completions"` into short protocol names.
+fn split_endpoint(ep: Option<&str>) -> (Option<String>, Option<String>) {
+    let Some(ep) = ep.map(str::trim).filter(|ep| !ep.is_empty()) else {
+        return (None, None);
+    };
+    let (inbound, upstream) = match ep.split_once('→') {
+        Some((a, b)) => (a, b),
+        None => (ep, ""),
+    };
+    (short_protocol(inbound), short_protocol(upstream))
+}
+
+/// Collapse an endpoint path to the badge the table shows.
+fn short_protocol(path: &str) -> Option<String> {
+    let path = path.trim();
+    if path.is_empty() {
+        return None;
     }
-    out
+    let lower = path.to_ascii_lowercase();
+    let name = if lower.contains("chat") {
+        "chat"
+    } else if lower.contains("responses") {
+        "resp"
+    } else if lower.contains("messages") {
+        "mess"
+    } else if lower.contains("beta/models") {
+        "gem"
+    } else {
+        path.trim_start_matches('/')
+    };
+    Some(name.to_string())
 }
-
-#[cfg(test)]
-#[path = "tests/model.rs"]
-mod tests;
 
 /// Relationship between the protocol the client spoke and the one used upstream.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Protocol {
     /// Both known and identical; conversion did not happen.
     Same(String),
-    /// Both known and different; AxonHub converted in flight.
+    /// Both known and different; Magpie converted in flight.
     Converted {
         from: String,
         to: String,
@@ -747,63 +864,31 @@ pub enum Protocol {
     Unknown,
 }
 
-impl Protocol {
-    pub fn is_converted(&self) -> bool {
-        matches!(self, Protocol::Converted { .. })
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     Completed,
     Failed,
+    /// In flight right now.
     Processing,
-    Canceled,
-    Pending,
 }
 
 impl Status {
-    pub fn parse(raw: Option<&str>) -> Self {
-        match raw.unwrap_or("") {
-            "completed" => Status::Completed,
-            "failed" => Status::Failed,
-            "processing" => Status::Processing,
-            "canceled" => Status::Canceled,
-            _ => Status::Pending,
-        }
-    }
-
-    /// Label for the detail popup, which names the state rather than encoding
-    /// it as a colour the way the cards do.
-    pub fn label(self) -> &'static str {
-        match self {
-            Status::Completed => "成功",
-            Status::Failed => "失败",
-            Status::Processing => "进行中",
-            Status::Canceled => "已取消",
-            Status::Pending => "等待中",
-        }
-    }
-
     /// Whether the row is still in flight; drives the faster poll cadence.
     pub fn is_active(self) -> bool {
-        matches!(self, Status::Processing | Status::Pending)
+        self == Status::Processing
     }
 }
 
-/// Which request states the list asks for. The header chips mirror this enum:
-/// one chip per filter plus 全部 for the empty mask. Chips toggle
-/// independently, so any combination of states can be selected at once.
-/// The mask is sent as `RequestWhereInput.statusIn`, not applied locally.
+/// Which rows the table shows. The header chips mirror this enum, plus 全 for
+/// the empty mask. Filtering happens locally on the fetched page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Filter {
     #[default]
     All,
     Completed,
     Failed,
-    Active,
-    Pending,
-    Canceled,
+    Live,
+    Retried,
 }
 
 /// Bitmask of selected `Filter`s; the empty mask shows everything (`All`).
@@ -812,21 +897,18 @@ pub type FilterMask = u8;
 pub const FILTER_NONE: FilterMask = 0;
 pub const FILTER_COMPLETED: FilterMask = 1 << 0;
 pub const FILTER_FAILED: FilterMask = 1 << 1;
-pub const FILTER_ACTIVE: FilterMask = 1 << 2;
-pub const FILTER_PENDING: FilterMask = 1 << 3;
-pub const FILTER_CANCELED: FilterMask = 1 << 4;
+pub const FILTER_LIVE: FilterMask = 1 << 2;
+pub const FILTER_RETRIED: FilterMask = 1 << 3;
 
 impl Filter {
-    /// Header chip labels: one character each, so the six chips leave the
-    /// header's width to the id field and the subtitle.
+    /// Header chip labels: one character each.
     pub fn label(self) -> &'static str {
         match self {
             Filter::All => "全",
             Filter::Completed => "成",
             Filter::Failed => "败",
-            Filter::Active => "行",
-            Filter::Pending => "等",
-            Filter::Canceled => "消",
+            Filter::Live => "行",
+            Filter::Retried => "重",
         }
     }
 
@@ -836,35 +918,38 @@ impl Filter {
             Filter::All => FILTER_NONE,
             Filter::Completed => FILTER_COMPLETED,
             Filter::Failed => FILTER_FAILED,
-            Filter::Active => FILTER_ACTIVE,
-            Filter::Pending => FILTER_PENDING,
-            Filter::Canceled => FILTER_CANCELED,
+            Filter::Live => FILTER_LIVE,
+            Filter::Retried => FILTER_RETRIED,
+        }
+    }
+
+    /// Whether `row` passes this chip.
+    pub fn matches(self, row: &Row) -> bool {
+        match self {
+            Filter::All => true,
+            Filter::Completed => row.status == Status::Completed,
+            Filter::Failed => row.status == Status::Failed,
+            Filter::Live => row.live,
+            Filter::Retried => row.tries > 1 || row.handed_on,
         }
     }
 }
 
-/// `RequestWhereInput.statusIn` for a chip mask. `None` is the console's
-/// unfiltered query: the field is omitted and every status comes back.
-/// Each chip maps to one wire status, matching the requests page.
-pub fn status_in(mask: FilterMask) -> Option<Vec<&'static str>> {
+/// Whether a row passes a chip mask. An empty mask shows everything.
+pub fn passes(mask: FilterMask, row: &Row) -> bool {
     if mask == FILTER_NONE {
-        return None;
+        return true;
     }
-    let mut out = Vec::new();
-    if mask & FILTER_COMPLETED != 0 {
-        out.push("completed");
-    }
-    if mask & FILTER_FAILED != 0 {
-        out.push("failed");
-    }
-    if mask & FILTER_ACTIVE != 0 {
-        out.push("processing");
-    }
-    if mask & FILTER_PENDING != 0 {
-        out.push("pending");
-    }
-    if mask & FILTER_CANCELED != 0 {
-        out.push("canceled");
-    }
-    Some(out)
+    [
+        Filter::Completed,
+        Filter::Failed,
+        Filter::Live,
+        Filter::Retried,
+    ]
+    .into_iter()
+    .any(|filter| mask & filter.mask() != 0 && filter.matches(row))
 }
+
+#[cfg(test)]
+#[path = "tests/model.rs"]
+mod tests;

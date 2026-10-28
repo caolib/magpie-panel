@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn parses_an_axonhub_timestamp() {
+fn parses_a_fractional_rfc3339_timestamp() {
     // 2026-09-12T02:20:57.7544744Z
     assert_eq!(
         parse_unix("2026-09-12T02:20:57.7544744Z"),
@@ -46,7 +46,7 @@ fn utc_parts_inverts_days_from_civil() {
 #[test]
 fn local_clock_is_derived_from_the_instant_not_the_wall_text() {
     // The same instant written with an offset must format identically to
-    // its UTC spelling, which is what `+08:00` AxonHub timestamps need.
+    // its UTC spelling, including gateway timestamps written with `+08:00`.
     let utc = local_parts(parse_unix("2026-09-12T02:20:57Z").unwrap());
     let offset = local_parts(parse_unix("2026-09-12T10:20:57+08:00").unwrap());
     assert_eq!(

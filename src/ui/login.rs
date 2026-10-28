@@ -1,61 +1,35 @@
-//! In-panel sign-in form.
+//! In-panel connection form.
 //!
 //! Deliberately not a native dialog: a modal message loop would pump messages
 //! meant for the panel and fight the always-on-top, no-activate window. The
-//! form renders with the same primitives as the request cards and keeps all
-//! input inside the panel's own message handling.
+//! form renders with the same primitives as the table and keeps all input
+//! inside the panel's own message handling.
 
-use crate::config::{Account, CredentialMode, Credentials};
+use crate::config::Account;
 use crate::theme::{self, Painter};
 use crate::ui::layout::{Metrics, Rect};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Field {
-    /// Name of the account being added or renamed.
+    /// Name the connection is listed under.
     Name,
+    /// Where the gateway listens, e.g. `http://127.0.0.1:3425`.
     Endpoint,
-    Email,
-    Password,
-    Token,
-    Remember,
-}
-
-/// Which credentials the form collects. Either a password or a token is enough
-/// to obtain access; the token path avoids putting a password on disk at all,
-/// while the password path is what lets the worker renew a session by itself.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Method {
-    Password,
-    Token,
-}
-
-impl Method {
-    /// Tab label.
-    pub fn label(self) -> &'static str {
-        match self {
-            Method::Password => "账号密码",
-            Method::Token => "访问令牌",
-        }
-    }
+    /// Gateway key. Only needed when the gateway is reached over the network;
+    /// a loopback gateway answers without one.
+    Key,
 }
 
 #[derive(Clone)]
 pub struct LoginForm {
     /// Account management returns to the settings window instead of exiting.
     pub return_to_settings: bool,
-    /// Label the account is saved under. Required: the menu lists accounts by
-    /// name, so an unnamed one would be an unlabelled entry.
-    pub account_name: String,
-    /// The account being edited, or `None` when this is a new one.
+    /// The connection being edited, or `None` when this is a new one.
     pub editing: Option<String>,
+    pub name: String,
     pub endpoint: String,
-    pub email: String,
-    pub password: String,
-    /// A pasted JWT, used when `method` is `Token`.
-    pub token: String,
-    pub method: Method,
-    /// How (and whether) credentials are persisted.
-    pub mode: CredentialMode,
+    /// The gateway key as typed. Empty means "no key".
+    pub key: String,
     pub focus: Field,
     /// Caret position, in characters, within the focused field.
     pub caret: usize,
@@ -77,87 +51,65 @@ fn byte_at(s: &str, chars: usize) -> usize {
 }
 
 impl LoginForm {
-    /// A form for a new account: nothing filled in but the endpoint the panel
-    /// already knows, and the name field waiting for a label.
-    pub fn adding(endpoint: &str, mode: CredentialMode) -> Self {
-        let mut form = LoginForm::blank(endpoint, mode);
-        form.focus = Field::Name;
-        form
-    }
-
-    /// A form for an existing account: its name and endpoint are prefilled so
-    /// signing in again is a paste of a fresh token.
-    pub fn for_account(account: &Account, mode: CredentialMode) -> Self {
-        let mut form = LoginForm::blank(&account.endpoint, mode);
-        form.account_name = account.name.clone();
-        form.editing = Some(account.id.clone());
-        form.focus = match form.method {
-            Method::Password => Field::Email,
-            Method::Token => Field::Token,
-        };
-        form
-    }
-
-    fn blank(endpoint: &str, mode: CredentialMode) -> Self {
-        // Password mode is the only reason to collect an email and password:
-        // it is what lets the worker sign in again after the session expires.
-        // Every other mode uses a pasted token.
-        let method = match mode {
-            CredentialMode::Password => Method::Password,
-            _ => Method::Token,
-        };
-        let focus = match method {
-            Method::Password => Field::Email,
-            Method::Token => Field::Token,
-        };
+    /// A form for a new connection: the endpoint the panel already knows is
+    /// filled in, and the name field waits for a label.
+    pub fn adding(endpoint: &str) -> Self {
         LoginForm {
             return_to_settings: false,
-            account_name: String::new(),
             editing: None,
+            name: String::new(),
             endpoint: endpoint.to_string(),
-            email: String::new(),
-            password: String::new(),
-            token: String::new(),
-            method,
-            focus,
+            key: String::new(),
+            focus: Field::Name,
             caret: 0,
             anchor: None,
             error: None,
             busy: false,
             caret_on: true,
-            mode,
+        }
+    }
+
+    /// A form for an existing connection: its name and endpoint are prefilled
+    /// so re-saving only means touching the gateway key.
+    pub fn for_account(account: &Account) -> Self {
+        LoginForm {
+            return_to_settings: false,
+            editing: Some(account.id.clone()),
+            name: account.name.clone(),
+            endpoint: account.endpoint.clone(),
+            key: String::new(),
+            focus: Field::Key,
+            caret: 0,
+            anchor: None,
+            error: None,
+            busy: false,
+            caret_on: true,
         }
     }
 
     /// The value a field holds.
     pub fn value(&self, field: Field) -> &str {
         match field {
-            Field::Name => &self.account_name,
+            Field::Name => &self.name,
             Field::Endpoint => &self.endpoint,
-            Field::Email => &self.email,
-            Field::Password => &self.password,
-            Field::Token => &self.token,
-            Field::Remember => "",
+            Field::Key => &self.key,
         }
     }
 
-    fn value_mut(&mut self, field: Field) -> Option<&mut String> {
+    fn value_mut(&mut self, field: Field) -> &mut String {
         match field {
-            Field::Name => Some(&mut self.account_name),
-            Field::Endpoint => Some(&mut self.endpoint),
-            Field::Email => Some(&mut self.email),
-            Field::Password => Some(&mut self.password),
-            Field::Token => Some(&mut self.token),
-            Field::Remember => None,
+            Field::Name => &mut self.name,
+            Field::Endpoint => &mut self.endpoint,
+            Field::Key => &mut self.key,
         }
     }
 
     /// Whether the field shows its value as asterisks.
     pub fn masked(field: Field) -> bool {
-        field == Field::Password
+        field == Field::Key
     }
 
-    /// The value as drawn: passwords become a run of asterisks.
+    /// The value as drawn: the key becomes a run of asterisks.
     pub fn shown_value(&self, field: Field) -> String {
         let value = self.value(field);
         if Self::masked(field) {
@@ -264,151 +216,75 @@ impl LoginForm {
             return false;
         };
         let field = self.focus;
-        if let Some(text) = self.value_mut(field) {
-            let (start, end) = (byte_at(text, lo), byte_at(text, hi));
-            text.replace_range(start..end, "");
-        }
+        let text = self.value_mut(field);
+        let (start, end) = (byte_at(text, lo), byte_at(text, hi));
+        text.replace_range(start..end, "");
         self.caret = lo;
         self.anchor = None;
         self.caret_on = true;
         true
     }
 
-    pub fn set_mode(&mut self, mode: CredentialMode) {
-        self.mode = mode;
-        self.error = None;
+    /// The endpoint as the worker should call it: trimmed, no trailing slash.
+    pub fn trimmed_endpoint(&self) -> String {
+        self.endpoint.trim().trim_end_matches('/').to_string()
     }
 
-    /// Switch between the token and password tabs.
-    ///
-    /// The two methods collect different fields, so switching also moves the
-    /// focus to the first field the new method asks for. The storage mode
-    /// follows the method where it has to: collecting a password only makes
-    /// sense when that password is kept (otherwise it buys nothing over a
-    /// token), and leaving the password tab drops the password mode back to a
-    /// token, which the form can actually collect. Switching is refused while
-    /// a sign-in is in flight, since the submitted credentials must not change
-    /// underneath the worker.
-    pub fn set_method(&mut self, method: Method) {
-        if self.busy {
-            return;
-        }
-        if method != self.method {
-            match (self.method, method) {
-                (Method::Token, Method::Password) => {
-                    self.mode = CredentialMode::Password;
-                }
-                (Method::Password, Method::Token) if self.mode == CredentialMode::Password => {
-                    self.mode = CredentialMode::Token;
-                }
-                _ => {}
-            }
-            self.method = method;
-        }
-        self.focus_field(match method {
-            Method::Password => Field::Email,
-            Method::Token => Field::Token,
-        });
-        self.error = None;
-    }
-
-    /// Cycle the credential storage mode. The password method also offers the
-    /// password mode; the token method cannot collect a password, so its list
-    /// stays on the two modes that make sense there.
-    pub fn cycle_mode(&mut self) {
-        if self.busy {
-            return;
-        }
-        let next = match self.method {
-            Method::Password => match self.mode {
-                CredentialMode::None => CredentialMode::Token,
-                CredentialMode::Token => CredentialMode::Password,
-                CredentialMode::Password => CredentialMode::None,
-            },
-            Method::Token => match self.mode {
-                CredentialMode::None => CredentialMode::Token,
-                _ => CredentialMode::None,
-            },
-        };
-        self.set_mode(next);
-    }
-
-    pub fn credentials(&self) -> Credentials {
-        Credentials {
-            email: self.email.trim().to_string(),
-            password: self.password.clone(),
-        }
-    }
-
-    /// The pasted token, with any `Bearer ` prefix and whitespace removed.
-    pub fn trimmed_token(&self) -> String {
-        self.token
+    /// The gateway key as stored: whitespace and a `Bearer ` prefix removed.
+    /// An empty result means the connection needs no key.
+    pub fn trimmed_key(&self) -> String {
+        self.key
             .trim()
             .trim_start_matches("Bearer ")
             .trim()
             .to_string()
     }
 
+    /// The name to save under: what the user typed, or the endpoint's host when
+    /// the box was left empty.
+    pub fn resolved_name(&self) -> String {
+        let name = self.name.trim();
+        if name.is_empty() {
+            crate::config::endpoint_host(&self.trimmed_endpoint())
+        } else {
+            name.to_string()
+        }
+    }
+
     pub fn validate(&self) -> Result<(), String> {
-        if self.account_name.trim().is_empty() {
-            return Err("请填写账号名称".into());
+        let endpoint = self.trimmed_endpoint();
+        if endpoint.is_empty() {
+            return Err("请填写 Magpie 地址".into());
         }
-        if self.endpoint.trim().is_empty() {
-            return Err("请填写 AxonHub 地址".into());
-        }
-        if !self.endpoint.trim().starts_with("http") {
+        if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
             return Err("地址需要以 http:// 或 https:// 开头".into());
-        }
-        match self.method {
-            Method::Password => {
-                if self.email.trim().is_empty() {
-                    return Err("邮箱不能为空".into());
-                }
-                if self.password.is_empty() {
-                    return Err("密码不能为空".into());
-                }
-            }
-            Method::Token => {
-                let token = self.trimmed_token();
-                if token.is_empty() {
-                    return Err("请粘贴访问令牌".into());
-                }
-                if !crate::token::looks_like_jwt(&token) {
-                    return Err("令牌格式不正确,应为三段以 . 分隔的字符串".into());
-                }
-                if crate::token::is_expired(&token, crate::time::now_unix()) {
-                    return Err("该令牌已过期,请在 AxonHub 重新获取".into());
-                }
-            }
         }
         Ok(())
     }
 
     /// The text field currently receiving keystrokes.
-    fn focused_text(&mut self) -> Option<&mut String> {
+    fn focused_text(&mut self) -> &mut String {
         self.value_mut(self.focus)
     }
 
-    /// Maximum characters the focused field accepts. Endpoint and email have no
-    /// legitimate need for long input; a JWT is a few hundred characters.
+    /// Maximum characters the focused field accepts.
     fn char_limit(&self) -> usize {
         match self.focus {
-            Field::Token => 4096,
+            Field::Key => 512,
             Field::Name => 64,
-            _ => 256,
+            Field::Endpoint => 256,
         }
     }
 
     /// Whether `ch` is allowed in the currently focused text field.
     ///
-    /// Endpoint / email / token are URL- or JWT-shaped ASCII, so they keep the
-    /// original ASCII-only policy. The password and account-name fields accept
-    /// any printable Unicode (everything except control characters) so a
-    /// non-ASCII password or a Chinese account name is not silently dropped.
+    /// The endpoint is URL-shaped ASCII. The name and the key accept any
+    /// printable Unicode (everything except control characters), so a Chinese
+    /// label or an unusual key is not silently dropped.
     fn accepts(&self, ch: char) -> bool {
         match self.focus {
-            Field::Password | Field::Name => !ch.is_control(),
-            _ => ch.is_ascii_graphic() || ch == ' ',
+            Field::Name | Field::Key => !ch.is_control(),
+            Field::Endpoint => ch.is_ascii_graphic() || ch == ' ',
         }
     }
 
@@ -422,9 +298,8 @@ impl LoginForm {
         let limit = self.char_limit();
         let caret = self.caret.min(self.focused_len());
         let mut placed = false;
-        if let Some(text) = self.focused_text()
-            && text.chars().count() < limit
-        {
+        let text = self.focused_text();
+        if text.chars().count() < limit {
             let at = byte_at(text, caret);
             text.insert(at, ch);
             placed = true;
@@ -437,20 +312,10 @@ impl LoginForm {
     }
 
     /// Insert a pasted string at the caret, replacing any selection, filtered
-    /// to characters the field can hold. A JWT copied from DevTools can arrive
-    /// with surrounding whitespace or a `Bearer ` prefix, and may contain
-    /// newlines if the copy spanned lines.
+    /// to characters the field can hold.
     pub fn paste(&mut self, raw: &str) {
         let cleaned: String = raw.chars().filter(|c| self.accepts(*c)).collect();
-        // A pasted password is kept verbatim: only control characters were
-        // filtered above, since a real password may legitimately contain
-        // leading/trailing spaces. Other fields may carry surrounding
-        // whitespace or a `Bearer ` prefix, so they keep the trim.
-        let cleaned: &str = if self.focus == Field::Password {
-            &cleaned
-        } else {
-            cleaned.trim()
-        };
+        let cleaned = cleaned.trim();
         if cleaned.is_empty() {
             return;
         }
@@ -462,10 +327,9 @@ impl LoginForm {
         if taken.is_empty() {
             return;
         }
-        if let Some(text) = self.focused_text() {
-            let at = byte_at(text, caret);
-            text.insert_str(at, &taken);
-        }
+        let text = self.focused_text();
+        let at = byte_at(text, caret);
+        text.insert_str(at, &taken);
         self.caret = caret + taken.chars().count();
         self.caret_on = true;
         self.error = None;
@@ -473,9 +337,7 @@ impl LoginForm {
 
     /// Empty the focused field (Ctrl+X with nothing selected).
     pub fn clear_focused(&mut self) {
-        if let Some(text) = self.focused_text() {
-            text.clear();
-        }
+        self.focused_text().clear();
         self.caret = 0;
         self.anchor = None;
         self.caret_on = true;
@@ -493,10 +355,9 @@ impl LoginForm {
         if caret == 0 {
             return;
         }
-        if let Some(text) = self.focused_text() {
-            let (start, end) = (byte_at(text, caret - 1), byte_at(text, caret));
-            text.replace_range(start..end, "");
-        }
+        let text = self.focused_text();
+        let (start, end) = (byte_at(text, caret - 1), byte_at(text, caret));
+        text.replace_range(start..end, "");
         self.caret = caret - 1;
         self.caret_on = true;
         self.error = None;
@@ -513,46 +374,31 @@ impl LoginForm {
         if caret >= self.focused_len() {
             return;
         }
-        if let Some(text) = self.focused_text() {
-            let (start, end) = (byte_at(text, caret), byte_at(text, caret + 1));
-            text.replace_range(start..end, "");
-        }
+        let text = self.focused_text();
+        let (start, end) = (byte_at(text, caret), byte_at(text, caret + 1));
+        text.replace_range(start..end, "");
         self.caret_on = true;
         self.error = None;
     }
 
     pub fn focus_next(&mut self, backwards: bool) {
-        let order: &[Field] = match self.method {
-            Method::Password => &[
-                Field::Name,
-                Field::Endpoint,
-                Field::Email,
-                Field::Password,
-                Field::Remember,
-            ],
-            Method::Token => &[Field::Name, Field::Endpoint, Field::Token, Field::Remember],
-        };
-        let index = order.iter().position(|f| *f == self.focus).unwrap_or(0);
-        let len = order.len();
+        const ORDER: [Field; 3] = [Field::Name, Field::Endpoint, Field::Key];
+        let index = ORDER.iter().position(|f| *f == self.focus).unwrap_or(0);
+        let len = ORDER.len();
         let next = if backwards {
             (index + len - 1) % len
         } else {
             (index + 1) % len
         };
-        self.focus_field(order[next]);
+        self.focus_field(ORDER[next]);
     }
 }
 
-/// Geometry of the sign-in form, recomputed per paint. The password and token
-/// methods show a different set of fields, so the layout follows the method.
+/// Geometry of the form, recomputed per paint.
 pub struct LoginLayout {
     pub card: Rect,
-    /// The two method tabs, in display order.
-    pub tabs: Vec<(Rect, Method)>,
-    /// (rect, label) for the fields currently shown.
+    /// (rect, label) for name, endpoint and gateway key.
     pub fields: Vec<(Rect, &'static str)>,
-    pub mode_select: Rect,
-    pub remember_box: Rect,
     pub button: Rect,
     pub error_y: f32,
 }
@@ -561,32 +407,22 @@ pub struct LoginLayout {
 const FIELD_H: f32 = 34.0;
 const LABEL_H: f32 = 18.0;
 const FIELD_GAP: f32 = 14.0;
-/// Title and subtitle, down to the method tabs.
-const HEAD_H: f32 = 62.0;
-const TAB_H: f32 = 28.0;
-const TAB_W: f32 = 104.0;
-const TAB_GAP: f32 = 8.0;
-/// Tab row plus the gap down to the first field label.
-const TABS_H: f32 = TAB_H + 12.0;
-/// Everything below the last field: mode line, button and error line.
-const TAIL_H: f32 = 118.0;
+/// Title and subtitle, down to the first field label.
+const HEAD_H: f32 = 56.0;
+/// Everything below the last field: hint line, button and error line.
+const TAIL_H: f32 = 116.0;
 /// Breathing room kept above and below the card.
 const CARD_MARGIN: f32 = 16.0;
-/// Fields the password method shows: name, endpoint, email, password.
-const PASSWORD_FIELDS: f32 = 4.0;
+const FIELD_COUNT: f32 = 3.0;
 
-/// Height that fits the tallest (password) form with its margins, in device
-/// pixels. The panel's own default window is taller, but a window temporarily
-/// reused for sign-in — the settings window, for one — must not clip the card.
+/// Height that fits the form with its margins, in device pixels.
 pub fn window_height(scale: f32) -> i32 {
     let s = scale.max(0.5);
-    let card_h = (HEAD_H + TABS_H + TAIL_H) + PASSWORD_FIELDS * (LABEL_H + FIELD_H + FIELD_GAP);
+    let card_h = (HEAD_H + TAIL_H) + FIELD_COUNT * (LABEL_H + FIELD_H + FIELD_GAP);
     ((card_h + CARD_MARGIN * 2.0) * s).ceil() as i32
 }
 
-pub fn layout(form: &LoginForm, m: Metrics) -> LoginLayout {
-    // The form is authored at 96 DPI and scales with the monitor so it stays
-    // legible on a high-DPI display.
+pub fn layout(_form: &LoginForm, m: Metrics) -> LoginLayout {
     let s = m.scale;
     let (field_h, label_h, field_gap) = (FIELD_H * s, LABEL_H * s, FIELD_GAP * s);
 
@@ -595,14 +431,7 @@ pub fn layout(form: &LoginForm, m: Metrics) -> LoginLayout {
     let inner_x = card_x + 18.0 * s;
     let inner_w = card_w - 36.0 * s;
 
-    let has_credentials = form.method == Method::Password;
-    let field_count = if has_credentials {
-        PASSWORD_FIELDS
-    } else {
-        3.0
-    };
-    let card_h = (HEAD_H + TABS_H + TAIL_H) * s + field_count * (label_h + field_h + field_gap);
-
+    let card_h = (HEAD_H + TAIL_H) * s + FIELD_COUNT * (label_h + field_h + field_gap);
     let card_y = ((m.height - card_h) / 2.0).max(CARD_MARGIN * s);
     let card = Rect {
         x: card_x,
@@ -611,80 +440,37 @@ pub fn layout(form: &LoginForm, m: Metrics) -> LoginLayout {
         h: card_h,
     };
 
-    // Title and subtitle, then the two method tabs side by side.
-    let tabs_y = card_y + HEAD_H * s;
-    let tabs = vec![
-        (
-            Rect {
-                x: inner_x,
-                y: tabs_y,
-                w: TAB_W * s,
-                h: TAB_H * s,
-            },
-            Method::Token,
-        ),
-        (
-            Rect {
-                x: inner_x + (TAB_W + TAB_GAP) * s,
-                y: tabs_y,
-                w: TAB_W * s,
-                h: TAB_H * s,
-            },
-            Method::Password,
-        ),
-    ];
-
-    let mut y = tabs_y + TABS_H * s;
-    let mut fields = Vec::with_capacity(4);
-    let push = |fields: &mut Vec<(Rect, &'static str)>, label: &'static str, y: &mut f32| {
+    let mut y = card_y + HEAD_H * s;
+    let mut fields = Vec::with_capacity(3);
+    for label in [
+        "名称  (可留空)",
+        "Magpie 地址",
+        "网关密钥  (本机访问可留空)",
+    ] {
         fields.push((
             Rect {
                 x: inner_x,
-                y: *y + label_h,
+                y: y + label_h,
                 w: inner_w,
                 h: field_h,
             },
             label,
         ));
-        *y += label_h + field_h + field_gap;
-    };
-
-    push(&mut fields, "账号名称", &mut y);
-    push(&mut fields, "AxonHub 地址", &mut y);
-    if has_credentials {
-        push(&mut fields, "邮箱", &mut y);
-        push(&mut fields, "密码", &mut y);
-    } else {
-        push(&mut fields, "访问令牌(JWT)  可 Ctrl+V 粘贴", &mut y);
+        y += label_h + field_h + field_gap;
     }
 
-    let mode_select = Rect {
-        x: inner_x,
-        y: y + 2.0 * s,
-        w: inner_w,
-        h: 16.0 * s,
-    };
-    let remember_box = Rect {
-        x: inner_x,
-        y: y + 26.0 * s,
-        w: 16.0 * s,
-        h: 16.0 * s,
-    };
     let button = Rect {
         x: inner_x,
-        y: y + 56.0 * s,
+        y: y + 26.0 * s,
         w: inner_w,
         h: 36.0 * s,
     };
 
     LoginLayout {
         card,
-        tabs,
         fields,
-        mode_select,
-        remember_box,
         button,
-        error_y: y + 98.0 * s,
+        error_y: y + 68.0 * s,
     }
 }
 
@@ -712,15 +498,18 @@ fn width_up_to(p: &Painter, fonts: &theme::Fonts, shown: &str, chars: usize) -> 
     p.dual_measure(&fonts.body, &shown[..byte_at(shown, chars)])
 }
 
+/// Space kept between the caret and the right edge of the box.
+const CARET_MARGIN: f32 = 8.0;
+
 /// How far the text is scrolled left so the caret stays in view. Long values
-/// (a JWT is ~200 characters) therefore show their tail, while the caret can
-/// still be moved back to reveal the rest.
+/// (a key can be wide) therefore show their tail, while the caret can still be
+/// moved back to reveal the rest.
 fn scroll_offset(p: &Painter, fonts: &theme::Fonts, shown: &str, caret: usize, text_w: f32) -> f32 {
     (width_up_to(p, fonts, shown, caret) + CARET_MARGIN - text_w).max(0.0)
 }
 
 /// The character boundary under `local_x`, given in pixels from the start of
-/// the text. Binary search: a long token would make a linear scan of every
+/// the text. Binary search: a long key would make a linear scan of every
 /// prefix far too expensive to run on a mouse move.
 fn index_at_x(p: &Painter, fonts: &theme::Fonts, shown: &str, local_x: f32) -> usize {
     let total = shown.chars().count();
@@ -735,9 +524,6 @@ fn index_at_x(p: &Painter, fonts: &theme::Fonts, shown: &str, local_x: f32) -> u
     }
     lo
 }
-
-/// Space kept between the caret and the right edge of the box.
-const CARET_MARGIN: f32 = 8.0;
 
 /// Draw a rounded text input, with its selection and caret when focused.
 fn text_field(
@@ -881,11 +667,14 @@ pub fn place_caret(
     y: f32,
     press: bool,
 ) -> bool {
+    const FIELDS: [Field; 3] = [Field::Name, Field::Endpoint, Field::Key];
     let l = layout(form, m);
-    let Some((field, rect)) = l.fields.iter().enumerate().find_map(|(i, (rect, _))| {
-        rect.contains(x, y)
-            .then_some((field_for(form.method, i), *rect))
-    }) else {
+    let Some((field, rect)) = l
+        .fields
+        .iter()
+        .enumerate()
+        .find_map(|(i, (rect, _))| rect.contains(x, y).then_some((FIELDS[i], *rect)))
+    else {
         return false;
     };
     let before = (form.focus, form.caret, form.anchor);
@@ -911,12 +700,9 @@ pub fn place_caret(
 /// The placeholder a field shows while empty.
 fn placeholder_for(field: Field) -> &'static str {
     match field {
-        Field::Name => "例如:工作、个人",
-        Field::Endpoint => "http://localhost:8090",
-        Field::Email => "you@example.com",
-        Field::Password => "输入密码",
-        Field::Token => "eyJhbGciOi...",
-        _ => "",
+        Field::Name => "例如:本机、公司",
+        Field::Endpoint => crate::config::DEFAULT_ENDPOINT,
+        Field::Key => "本机网关无需填写",
     }
 }
 
@@ -930,6 +716,7 @@ pub fn hit_text_field(form: &LoginForm, m: Metrics, x: f32, y: f32) -> bool {
 }
 
 pub fn draw(p: &Painter, fonts: &theme::Fonts, form: &LoginForm, m: Metrics) {
+    const FIELDS: [Field; 3] = [Field::Name, Field::Endpoint, Field::Key];
     let l = layout(form, m);
     let s = m.scale;
     let inset = 18.0 * s;
@@ -947,9 +734,13 @@ pub fn draw(p: &Painter, fonts: &theme::Fonts, form: &LoginForm, m: Metrics) {
 
     p.dual_text(
         &fonts.bold,
-        "登录 AxonHub",
+        if form.editing.is_some() {
+            "编辑 Magpie 连接"
+        } else {
+            "添加 Magpie 连接"
+        },
         l.card.x + inset,
-        l.card.y + 14.0 * s,
+        l.card.y + 12.0 * s,
         l.card.w - inset * 2.0,
         22.0 * s,
         theme::TEXT,
@@ -957,40 +748,14 @@ pub fn draw(p: &Painter, fonts: &theme::Fonts, form: &LoginForm, m: Metrics) {
     );
     p.dual_text(
         &fonts.small,
-        "可添加多个账号,请求合并显示;访问令牌或账号密码均可登录",
+        "可添加多个网关,请求合并显示;默认地址 http://127.0.0.1:3425",
         l.card.x + inset,
-        l.card.y + 36.0 * s,
+        l.card.y + 34.0 * s,
         l.card.w - inset * 2.0,
         18.0 * s,
         theme::TEXT_FAINT,
         theme::ALIGN_NEAR,
     );
-
-    // Method tabs: token is the everyday path, password is what enables the
-    // worker to renew a session on its own. Switching is refused while busy, so
-    // the tabs read as disabled in that state.
-    for (rect, method) in &l.tabs {
-        let selected = form.method == *method;
-        let (fill, border, color) = if form.busy {
-            (theme::INPUT_BG, theme::INPUT_BORDER, theme::TEXT_FAINT)
-        } else if selected {
-            (theme::TAB_ON, theme::MAUVE, theme::TEXT)
-        } else {
-            (theme::INPUT_BG, theme::INPUT_BORDER, theme::TEXT_DIM)
-        };
-        p.round_rect(rect.x, rect.y, rect.w, rect.h, 6.0 * s, fill, true);
-        p.round_rect(rect.x, rect.y, rect.w, rect.h, 6.0 * s, border, false);
-        p.dual_text(
-            &fonts.small,
-            method.label(),
-            rect.x,
-            rect.y,
-            rect.w,
-            rect.h,
-            color,
-            theme::ALIGN_CENTER,
-        );
-    }
 
     if form.return_to_settings {
         let r = back_button(form, m);
@@ -1007,7 +772,7 @@ pub fn draw(p: &Painter, fonts: &theme::Fonts, form: &LoginForm, m: Metrics) {
     }
 
     for (i, (rect, label)) in l.fields.iter().enumerate() {
-        let field = field_for(form.method, i);
+        let field = FIELDS[i];
         let focused = form.focus == field;
         let row = FieldView {
             label,
@@ -1021,39 +786,12 @@ pub fn draw(p: &Painter, fonts: &theme::Fonts, form: &LoginForm, m: Metrics) {
         text_field(p, fonts, *rect, &row, focused, form.caret_on);
     }
 
-    // Storage mode selector: a single line cycling through the three modes.
-    let mode_focused = form.focus == Field::Remember;
     p.dual_text(
         &fonts.small,
-        &format!("凭据:{}", form.mode.label()),
-        l.mode_select.x,
-        l.mode_select.y,
-        160.0 * s,
-        l.mode_select.h,
-        if mode_focused {
-            theme::MAUVE
-        } else {
-            theme::TEXT_DIM
-        },
-        theme::ALIGN_NEAR,
-    );
-    p.dual_text(
-        &fonts.small,
-        "点击切换",
-        l.mode_select.x + l.mode_select.w - 60.0 * s,
-        l.mode_select.y,
-        60.0 * s,
-        l.mode_select.h,
-        theme::TEXT_FAINT,
-        theme::ALIGN_FAR,
-    );
-
-    p.dual_text(
-        &fonts.small,
-        form.mode.hint(),
-        l.mode_select.x,
-        l.mode_select.y + 18.0 * s,
-        l.mode_select.w,
+        "密钥只在本机加密保存,远程访问网关时才需要",
+        l.button.x,
+        l.button.y - 22.0 * s,
+        l.button.w,
         16.0 * s,
         theme::TEXT_FAINT,
         theme::ALIGN_NEAR,
@@ -1071,7 +809,7 @@ pub fn draw(p: &Painter, fonts: &theme::Fonts, form: &LoginForm, m: Metrics) {
     );
     p.dual_text(
         &fonts.bold,
-        if form.busy { "登录中…" } else { "登录" },
+        if form.busy { "保存中…" } else { "保存" },
         l.button.x,
         l.button.y,
         l.button.w,
@@ -1100,30 +838,17 @@ pub fn draw(p: &Painter, fonts: &theme::Fonts, form: &LoginForm, m: Metrics) {
 
 /// Map a click to a form control.
 pub fn hit(form: &LoginForm, m: Metrics, x: f32, y: f32) -> Option<Action> {
+    const FIELDS: [Field; 3] = [Field::Name, Field::Endpoint, Field::Key];
     if form.return_to_settings && back_button(form, m).contains(x, y) {
         return Some(Action::Back);
     }
     let l = layout(form, m);
-    if !form.busy
-        && let Some((_, method)) = l.tabs.iter().find(|(rect, _)| rect.contains(x, y))
-    {
-        return Some(Action::SetMethod(*method));
-    }
     if l.button.contains(x, y) {
         return Some(Action::Submit);
     }
-    if l.mode_select.contains(x, y)
-        || (l.remember_box.contains(x, y)
-            || (y >= l.remember_box.y - 4.0
-                && y <= l.remember_box.y + l.remember_box.h + 4.0
-                && x >= l.remember_box.x
-                && x <= l.remember_box.x + 320.0))
-    {
-        return Some(Action::CycleMode);
-    }
     for (index, (rect, _)) in l.fields.iter().enumerate() {
         if rect.contains(x, y) {
-            return Some(Action::Focus(field_for(form.method, index)));
+            return Some(Action::Focus(FIELDS[index]));
         }
     }
     None
@@ -1133,21 +858,9 @@ fn back_button(form: &LoginForm, m: Metrics) -> Rect {
     let card = layout(form, m).card;
     Rect {
         x: card.x + card.w - 104.0 * m.scale,
-        y: card.y + 10.0 * m.scale,
+        y: card.y + 8.0 * m.scale,
         w: 86.0 * m.scale,
         h: 30.0 * m.scale,
-    }
-}
-
-/// Which field a displayed row corresponds to. The token method shows one row
-/// more than the password method, which has the two credential rows instead.
-fn field_for(method: Method, index: usize) -> Field {
-    match (method, index) {
-        (_, 0) => Field::Name,
-        (_, 1) => Field::Endpoint,
-        (Method::Password, 2) => Field::Email,
-        (Method::Password, _) => Field::Password,
-        (Method::Token, _) => Field::Token,
     }
 }
 
@@ -1155,9 +868,6 @@ fn field_for(method: Method, index: usize) -> Field {
 pub enum Action {
     Back,
     Submit,
-    CycleMode,
-    /// A method tab was clicked.
-    SetMethod(Method),
     Focus(Field),
 }
 

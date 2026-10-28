@@ -15,6 +15,16 @@ pub struct InstalledFont {
 }
 
 impl InstalledFont {
+    /// Test-only constructor: the search text is normally collected from the
+    /// font enumeration, which needs a live device context.
+    #[cfg(test)]
+    pub(crate) fn named(name: &str) -> Self {
+        InstalledFont {
+            name: name.to_string(),
+            search: name.to_lowercase(),
+        }
+    }
+
     pub fn matches(&self, query: &str) -> bool {
         query
             .split_whitespace()

@@ -3,11 +3,10 @@
 //! Scroll clamping lives in the UI layer because it depends on the live window
 //! metrics; this module only records intent.
 
-use crate::config::{Account, Config, HiddenChannel, Stored};
+use crate::config::{Account, Config, HiddenProvider, Stored};
 use crate::model::{self, Filter, FilterMask, Row};
 use crate::ui::login::LoginForm;
 use crate::worker::{AccountIssue, Update};
-use tracing::info;
 
 /// Which surface the panel is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,16 +15,16 @@ pub enum View {
     Login,
 }
 
-/// Which login the sign-in form is collecting.
+/// Which connection the form is editing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoginTarget {
-    /// A new account: the name field starts empty.
+    /// A new connection: the name field starts empty.
     Add,
-    /// An existing account, re-authenticating or being renamed.
+    /// An existing connection being edited.
     Account(String),
 }
 
-/// A "test this account" round trip the user asked for from the settings
+/// A "test this connection" round trip the user asked for from the settings
 /// window, and what came back.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Probe {
@@ -37,31 +36,28 @@ pub struct Probe {
 pub enum ProbeState {
     /// Waiting for the worker's answer.
     Running,
-    /// The account answered; the number is its total request count.
+    /// The connection answered; the number is its total request count.
     Ok(i64),
-    /// The account could not be reached, or has no credentials left.
+    /// The connection could not be reached.
     Failed(String),
 }
 
 pub struct App {
     pub view: View,
     pub config: Config,
-    /// The truncated list the UI renders, rebuilt on every update.
+    /// The list the UI renders, rebuilt on every update.
     pub rows: Vec<Row>,
-    axon_rows: Vec<Row>,
-    /// Selected status-filter bits, sent as `statusIn` on the next poll.
-    /// `FILTER_NONE` omits the field and asks for every status.
+    raw_rows: Vec<Row>,
+    /// Selected status-filter bits, applied locally in `rebuild`.
     pub filter: FilterMask,
-    /// Model id the list is narrowed to, after the header box is submitted.
-    /// `None` is the unfiltered page.
-    pub id_query: Option<String>,
-    /// Digits currently shown in the header box, whether or not they have been
-    /// submitted.
-    pub id_draft: String,
+    /// Text the list is narrowed to, after the header box is submitted.
+    pub query: Option<String>,
+    /// What is currently typed in the header box, submitted or not.
+    pub query_draft: String,
     /// The header box holds the keyboard.
-    pub id_editing: bool,
-    /// Caret visibility while `id_editing`; toggled by the blink timer.
-    pub id_caret: bool,
+    pub query_editing: bool,
+    /// Caret visibility while `query_editing`; toggled by the blink timer.
+    pub query_caret: bool,
     /// Unclamped scroll offset in pixels; the UI clamps against the metrics.
     pub scroll: f32,
     pub hover: Option<usize>,
@@ -69,15 +65,15 @@ pub struct App {
     /// Transient status line; `true` marks an error presentation.
     pub status: Option<(String, bool)>,
     pub login: Option<LoginForm>,
-    /// Saved accounts, mirroring `config.accounts`.
+    /// Saved connections, mirroring `config.accounts`.
     pub accounts: Vec<Account>,
-    /// Accounts that answered the last poll.
+    /// Connections that answered the last poll.
     pub open_accounts: Vec<String>,
-    /// Accounts that did not, with the reason.
+    /// Connections that did not, with the reason.
     pub issues: Vec<AccountIssue>,
-    /// The last account test, if one has been run.
+    /// The last connection test, if one has been run.
     pub probe: Option<Probe>,
-    /// What the last successful sign-in should be persisted as.
+    /// Gateway keys in memory, mirroring the encrypted blob.
     pub stored: Stored,
 }
 
@@ -87,12 +83,12 @@ impl App {
             view: View::List,
             accounts: config.accounts.clone(),
             rows: Vec::new(),
-            axon_rows: Vec::new(),
+            raw_rows: Vec::new(),
             filter: model::FILTER_NONE,
-            id_query: None,
-            id_draft: String::new(),
-            id_editing: false,
-            id_caret: true,
+            query: None,
+            query_draft: String::new(),
+            query_editing: false,
+            query_caret: true,
             scroll: 0.0,
             hover: None,
             selected: None,
@@ -106,24 +102,17 @@ impl App {
         }
     }
 
-    /// Show the sign-in form for one account (or for a new one), replacing
-    /// whatever the form held before.
+    /// Show the connection form for one connection (or for a new one).
     pub fn open_login(&mut self, message: Option<String>, target: LoginTarget) {
         let form = match &target {
-            LoginTarget::Account(id) => self
-                .config
-                .account(id)
-                .map(|account| LoginForm::for_account(account, self.config.credential_mode)),
+            LoginTarget::Account(id) => self.config.account(id).map(LoginForm::for_account),
             LoginTarget::Add => None,
         };
-        let mode = self.config.credential_mode;
-        let mut form = form.unwrap_or_else(|| LoginForm::adding(&self.config.endpoint, mode));
-        // Prefill the saved email when there is one: a re-sign-in after expiry
-        // should only need the password.
+        let mut form = form.unwrap_or_else(|| LoginForm::adding(&self.config.endpoint));
         if let LoginTarget::Account(id) = &target
-            && let Some(account) = self.stored.account(id)
+            && let Some(account) = self.config.account(id)
         {
-            form.email = account.email.clone();
+            form.key = self.stored.key_for(&account.id).unwrap_or_default();
         }
         form.error = message;
         self.login = Some(form);
@@ -136,25 +125,19 @@ impl App {
         self.view == View::Login
     }
 
-    /// How one account is doing, for the menu: `None` when it answered the last
-    /// poll, otherwise a short label for what is wrong.
+    /// How one connection is doing, for the menu: `None` when it answered the
+    /// last poll, otherwise a short label for what is wrong.
     pub fn account_state(&self, id: &str) -> Option<&'static str> {
-        let issue = self.issues.iter().find(|i| i.id == id)?;
-        Some(if issue.needs_signin {
-            "需重新登录"
-        } else {
-            "连接失败"
-        })
+        self.issues.iter().find(|i| i.id == id)?;
+        Some("连接失败")
     }
 
-    /// Whether any account failed its last poll — the server was unreachable,
-    /// or its token was rejected. Either way the account cannot connect, so
-    /// the settings button is drawn red while this holds.
+    /// Whether any connection failed its last poll.
     pub fn any_issue(&self) -> bool {
         !self.issues.is_empty()
     }
 
-    /// Start tracking a test for one account, replacing any previous result.
+    /// Start tracking a test for one connection, replacing any previous result.
     pub fn begin_probe(&mut self, id: &str) {
         self.probe = Some(Probe {
             id: id.to_string(),
@@ -166,80 +149,21 @@ impl App {
     pub fn apply_updates(&mut self, updates: Vec<Update>) {
         for update in updates {
             match update {
-                Update::SignedIn {
-                    account,
-                    creds,
-                    token,
-                    user,
-                } => {
-                    let project =
-                        crate::client::resolve_project(&user.user, &self.config.project_id);
-                    if !project.is_empty() {
-                        self.config.project_id = project;
-                    }
-                    self.view = View::List;
-                    self.status = Some(("已登录".into(), false));
-                    info!("登录成功");
-
-                    // Record the freshly issued token against the account that
-                    // signed in, and its password beside it. `store` strips the
-                    // password unless the selected mode allows one.
-                    let mut stored = self.stored.clone();
-                    stored.set_token(&account, &token);
-                    stored.set_credentials(&account, &creds);
-                    self.stored = stored.clone();
-                    self.config.store(&stored);
-                    self.accounts = self.config.accounts.clone();
-                    self.save();
-                }
-                Update::TokenRefreshed {
-                    account,
-                    token,
-                    project_id,
-                } => {
-                    // Silent renewal: no view or status change, so a form the
-                    // user is filling in is not yanked away.
-                    if let Some(saved) = self.config.accounts.iter_mut().find(|a| a.id == account) {
-                        saved.project_id = project_id;
-                    }
-                    let mut stored = self.stored.clone();
-                    stored.set_token(&account, &token);
-                    self.stored = stored.clone();
-                    self.config.store(&stored);
-                    self.save();
-                    info!("账号 {} 的令牌已自动刷新", account);
-                }
-                Update::Snapshot { rows, .. } => {
-                    self.axon_rows = rows;
+                Update::Snapshot { rows } => {
+                    self.raw_rows = rows;
                     self.rebuild();
                     self.status = self.status_line();
                 }
                 Update::Accounts { open, broken } => {
                     self.open_accounts = open;
-                    // A rejected token is dropped for good, so a restart does
-                    // not silently retry it. Other failures (an unreachable
-                    // server) keep their token and recover on their own.
-                    for issue in &broken {
-                        if issue.needs_signin {
-                            // Drop only the rejected token: a saved password
-                            // must survive so renewal can still use it.
-                            let mut stored = self.stored.clone();
-                            stored.clear_token(&issue.id);
-                            self.stored = stored.clone();
-                            self.config.store(&stored);
-                        }
-                    }
                     self.issues = broken;
                     self.status = self.status_line();
                 }
-                Update::Detail { .. } => {
-                    // Consumed by the window layer, which owns the detail popup;
-                    // `App` holds list state only.
-                }
+                // Popup-owned output is intercepted by the UI before this.
+                Update::Detail { .. } => {}
                 Update::Probe { id, result } => {
-                    // A late answer for an account the user has since tested
-                    // again (or signed into) is dropped rather than painted over
-                    // the newer state.
+                    // A late answer for a connection the user has since tested
+                    // again is dropped rather than painted over.
                     if let Some(probe) = self.probe.as_mut().filter(|p| p.id == id) {
                         probe.state = match result {
                             Ok(total) => ProbeState::Ok(total),
@@ -247,105 +171,55 @@ impl App {
                         };
                     }
                 }
-                Update::Failed(err) => {
-                    // The login view does not render the status line, so a failed
-                    // sign-in has to surface on the form itself. Clearing `busy`
-                    // is what lets the user correct their input and retry.
-                    if self.is_login()
-                        && let Some(form) = self.login.as_mut()
-                    {
-                        form.busy = false;
-                        form.error = Some(err.message());
-                    }
-                    self.status = Some((err.message(), true));
-                }
-                Update::SignedOut => {
-                    if self.is_login() {
-                        // Already collecting credentials; just surface the reason.
-                        if let Some(form) = self.login.as_mut() {
-                            form.busy = false;
-                        }
-                    } else {
-                        // Nothing is left to poll: ask for a token again, for
-                        // the first account that lost one.
-                        let target = match self.accounts.first() {
-                            Some(account) => LoginTarget::Account(account.id.clone()),
-                            None => LoginTarget::Add,
-                        };
-                        self.open_login(Some("登录已过期,请重新登录".into()), target);
-                    }
-                }
             }
         }
     }
 
-    /// What the status line should say after a poll: a broken account first,
-    /// otherwise a submitted id that came back with no row.
+    /// What the status line should say after a poll: a broken connection first,
+    /// otherwise a submitted query that came back empty.
     fn status_line(&self) -> Option<(String, bool)> {
-        if let Some(line) = self.issue_status() {
-            return Some(line);
+        if let Some(issue) = self.issues.first() {
+            return Some((format!("连接 {} {}", issue.name, issue.message), true));
         }
-        self.id_query
+        self.query
             .as_ref()
             .filter(|_| self.rows.is_empty())
-            .map(|_| ("未找到该模型".into(), true))
+            .map(|_| ("未找到匹配记录".into(), true))
     }
 
-    /// The status line for a broken account, if any: one line, naming the
-    /// account so it is clear which login needs attention.
-    fn issue_status(&self) -> Option<(String, bool)> {
-        let issue = self.issues.first()?;
-        Some((format!("账号 {} {}", issue.name, issue.message), true))
-    }
-
-    /// Re-sort the display list, newest first, capped at the configured row
-    /// count, then drop rows the user asked to hide. Status chips are not
-    /// applied here: the worker sends them as `statusIn`.
+    /// Apply filters and aliases, newest first, capped at the configured row
+    /// count.
     pub fn rebuild(&mut self) {
-        let mut rows = self.axon_rows.clone();
-        for row in &mut rows {
-            row.channel_key_label = crate::config::channel_key_text(
-                &self.config.channel_key_aliases,
-                &row.account_id,
-                row.channel.as_deref(),
-                row.channel_api_key_index,
-            );
-        }
-        // The rows from the worker keep the wire model ids; the display list is
-        // the one place abbreviations are applied, so the panel and the detail
-        // popup (both read from here) show the same short names. Re-applied on
-        // every rebuild, which is what makes a settings change take effect at
-        // once.
-        if !self.config.model_aliases.is_empty() {
-            for row in &mut rows {
-                row.model = model::display_model_name(&row.model, &self.config.model_aliases);
-                if let Some(routed) = row.routed_model.as_deref().map(str::to_string) {
-                    row.routed_model = Some(model::display_model_name(
-                        &routed,
-                        &self.config.model_aliases,
-                    ));
-                }
-                if let Some(upstream) = row.upstream_model.as_deref().map(str::to_string) {
-                    row.upstream_model = Some(model::display_model_name(
-                        &upstream,
-                        &self.config.model_aliases,
-                    ));
-                }
-            }
-        }
-        rows.sort_by_key(|row| std::cmp::Reverse(row.age_key()));
-        // A looked-up request is shown on its own, past the hidden-channel
-        // list: that filter is what the lookup is for.
-        let hidden = &self.config.hidden_channels;
-        if self.id_query.is_none() && !hidden.is_empty() {
+        let mut rows: Vec<_> = self
+            .raw_rows
+            .iter()
+            .map(|row| row.for_display(&self.config))
+            .collect();
+
+        let hidden = &self.config.hidden_providers;
+        if !hidden.is_empty() {
             rows.retain(|row| {
-                !row.channel.as_deref().is_some_and(|channel| {
+                let provider = row.provider_id.as_deref().or(row.provider.as_deref());
+                !provider.is_some_and(|provider| {
                     hidden
                         .iter()
-                        .any(|h| h.account_id == row.account_id && h.channel == channel)
+                        .any(|h| h.account_id == row.account_id && h.provider == provider)
                 })
             });
         }
+
+        if self.filter != model::FILTER_NONE {
+            rows.retain(|row| model::passes(self.filter, row));
+        }
+
+        if let Some(query) = self.query.as_deref() {
+            let needle = query.trim().to_lowercase();
+            if !needle.is_empty() {
+                rows.retain(|row| row_matches(row, &needle));
+            }
+        }
+
+        rows.sort_by_key(|row| std::cmp::Reverse(row.age_key()));
         rows.truncate(self.config.row_limit.max(1) as usize);
         self.rows = rows;
         if self.selected.is_some_and(|sel| sel >= self.rows.len()) {
@@ -353,36 +227,37 @@ impl App {
         }
     }
 
-    /// The channel filters the menu offers: every (account, channel) pair seen
-    /// in the fetched rows, plus the ones already hidden — which by definition
-    /// are absent from those rows and still have to be listed, checked, so they
-    /// can be shown again.
-    pub fn channel_filters(&self) -> Vec<HiddenChannel> {
-        let mut out: Vec<HiddenChannel> = self.config.hidden_channels.clone();
-        for row in &self.axon_rows {
-            let Some(channel) = row.channel.as_deref() else {
+    pub fn raw_rows(&self) -> &[Row] {
+        &self.raw_rows
+    }
+
+    /// The provider filters the settings window offers: every (connection,
+    /// provider) pair seen in the fetched rows, plus the ones already hidden —
+    /// which by definition are absent from those rows and still have to be
+    /// listed so they can be shown again.
+    pub fn provider_filters(&self) -> Vec<HiddenProvider> {
+        let mut out: Vec<HiddenProvider> = self.config.hidden_providers.clone();
+        for row in &self.raw_rows {
+            let Some(provider) = row.provider_id.as_deref().or(row.provider.as_deref()) else {
                 continue;
             };
             if row.account_id.is_empty() {
                 continue;
             }
-            let entry = HiddenChannel {
+            let entry = HiddenProvider {
                 account_id: row.account_id.clone(),
-                channel: channel.to_string(),
+                provider: provider.to_string(),
             };
             if !out.contains(&entry) {
                 out.push(entry);
             }
         }
-        // Grouped by account, then alphabetically, so the menu reads the same
-        // way twice in a row.
-        out.sort_by(|a, b| (&a.account_id, &a.channel).cmp(&(&b.account_id, &b.channel)));
+        out.sort_by(|a, b| (&a.account_id, &a.provider).cmp(&(&b.account_id, &b.provider)));
         out
     }
 
-    /// Apply a chip click: 全部 clears the mask, a status chip toggles its
-    /// bit. Returns whether the mask changed. The caller re-polls; the
-    /// previous page is dropped so it is not read as the filtered result.
+    /// Apply a chip click: 全部 clears the mask, a status chip toggles its bit.
+    /// Returns whether the mask changed.
     pub fn click_filter(&mut self, chip: Filter) -> bool {
         let next = if chip == Filter::All {
             model::FILTER_NONE
@@ -393,15 +268,45 @@ impl App {
             return false;
         }
         self.filter = next;
-        self.axon_rows.clear();
         self.rebuild();
         true
+    }
+
+    /// Apply the header box: an empty box clears the query.
+    pub fn apply_query(&mut self) {
+        let trimmed = self.query_draft.trim();
+        self.query = (!trimmed.is_empty()).then(|| trimmed.to_string());
+        self.scroll = 0.0;
+        self.rebuild();
+        self.status = self.query.as_ref().map(|_| ("筛选中…".into(), false));
     }
 
     /// Persist anything that changed while running.
     pub fn save(&self) {
         self.config.save();
     }
+}
+
+/// Whether a row mentions `needle` in any field the header box searches.
+fn row_matches(row: &Row, needle: &str) -> bool {
+    let fields = [
+        Some(row.model.as_str()),
+        Some(row.requested_model.as_str()),
+        row.served_model.as_deref(),
+        row.provider.as_deref(),
+        row.provider_id.as_deref(),
+        row.agent.as_deref(),
+        row.host.as_deref(),
+        row.endpoint.as_deref(),
+        Some(row.account_name.as_str()),
+        row.error.as_deref(),
+        row.rid.as_deref(),
+        row.session.as_deref(),
+    ];
+    fields
+        .into_iter()
+        .flatten()
+        .any(|value| value.to_lowercase().contains(needle))
 }
 
 #[cfg(test)]

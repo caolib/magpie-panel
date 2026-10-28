@@ -1,357 +1,333 @@
 use super::*;
-use crate::model::{CostItem, DetailData, Envelope, Status, TierCost};
+use crate::config::{Config, DisplayField, NameAlias};
+use crate::model::{Route, UsageRecord};
 
-/// Two attempts of one failed request — the shape the popup exists for.
-/// Values are stand-ins: the real ones carry gateway internals.
-const SAMPLE: &str = r#"{
-  "data": { "node": { "executions": { "edges": [
-    { "node": {
-      "createdAt": "2026-09-18T11:32:33.2110863Z",
-      "updatedAt": "2026-09-18T11:33:23.0073162Z",
-      "modelID": "glm-5.3-flash",
-      "upstreamModelID": "openai/upstream-a",
-      "channelAPIKeyIndex": 0,
-      "channel": { "id": "gid://axonhub/Channel/2", "name": "ch-b", "type": "openai", "baseURL": "https://api.example.com/v1" },
-      "status": "canceled",
-      "responseStatusCode": null,
-      "errorMessage": "failed to do request: HTTP request failed: context canceled",
-      "requestURL": "https://api.example.com/v1/chat/completions",
-      "format": "openai/chat_completions",
-      "reasoningEffort": "max",
-      "passThroughApplied": false,
-      "metricsFirstTokenLatencyMs": null,
-      "metricsReasoningDurationMs": null
-    } },
-    { "node": {
-      "createdAt": "2026-09-18T11:28:23.0328274Z",
-      "updatedAt": "2026-09-18T11:32:32.2058876Z",
-      "modelID": "glm-5.3-flash",
-      "upstreamModelID": "openai/upstream-b",
-      "channelAPIKeyIndex": 1,
-      "channel": { "id": "gid://axonhub/Channel/1", "name": "ch-a", "type": "openai", "baseURL": "http://10.0.0.1:18090/v1" },
-      "status": "failed",
-      "responseStatusCode": 429,
-      "errorMessage": "Concurrency limit exceeded for account, please retry later",
-      "requestURL": "http://10.0.0.1:18090/v1/chat/completions",
-      "format": "openai/chat_completions",
-      "reasoningEffort": "max",
-      "passThroughApplied": false,
-      "metricsFirstTokenLatencyMs": null,
-      "metricsReasoningDurationMs": null
-    } }
-  ], "totalCount": 2 } } }
+fn row(json: &str) -> Row {
+    Row::from_record(&serde_json::from_str::<UsageRecord>(json).expect("record"))
+}
+
+const FULL: &str = r#"{
+  "t":"2026-10-20T09:00:00Z","agentName":"app-secret","providerName":"Anthropic",
+  "providerAccount":"account-secret","providerKeyName":"main","host":"host-secret",
+  "ep":"endpoint-secret","req":"requested-secret","model":"vendor/model","served":"served-secret",
+  "effort":"effort-secret","in":1000,"out":200,"cache_read":4000,"cache_write":500,
+  "ms":5000,"status":502,"err":"upstream said no","tries":2,"handed_on":true,"route_id":77,
+  "rid":"request-secret","response_id":"response-secret","session":"session-secret",
+  "cost":0.25,"priced":true,"credits":1.5,"source":"source-secret"
 }"#;
 
-fn executions() -> Vec<ExecutionDetail> {
-    // Parsed through the envelope, exactly as the client does.
-    let envelope: Envelope<DetailData> = serde_json::from_str(SAMPLE).expect("sample parses");
-    envelope
-        .data
-        .expect("data")
-        .node
-        .expect("node")
-        .executions
-        .expect("executions")
-        .edges
-        .into_iter()
-        .filter_map(|e| e.node)
+#[test]
+fn details_only_contain_the_four_requested_fields() {
+    let doc = Doc::with_detail(&row(FULL), &ExecutionDetail::loading(), &Config::default());
+    assert_eq!(doc.rows.len(), 1);
+    assert_eq!(
+        doc.rows[0].cells(),
+        ["502", "Anthropic(main)", "model", "upstream said no"]
+    );
+    let text = plain_text(&doc);
+    for label in HEADERS {
+        assert!(text.contains(&format!("{label}:")));
+    }
+    for unwanted in [
+        "app-secret",
+        "account-secret",
+        "host-secret",
+        "endpoint-secret",
+        "requested-secret",
+        "served-secret",
+        "effort-secret",
+        "request-secret",
+        "response-secret",
+        "session-secret",
+        "source-secret",
+        "耗时:",
+        "费用:",
+        "令牌:",
+        "路由:",
+        "应用:",
+    ] {
+        assert!(!text.contains(unwanted), "unexpected {unwanted}");
+    }
+}
+
+#[test]
+fn recovered_success_keeps_each_failure_and_final_result_in_order() {
+    let raw = row(r#"{"status":200,"tries":3,"route_id":77,"model":"vendor/model"}"#);
+    let route: Route = serde_json::from_str(r#"{"id":77,"done":true,"order":[{"id":"same","name":"Provider","kind":"key","who":"friendly-key"}],"tries":[{"id":"same","model":"vendor/model","done":true,"status":429,"fail":"rate","error":"first failure"},{"id":"same","model":"vendor/model","done":true,"status":502,"error":"second failure\nmore details"},{"id":"same","model":"vendor/model","done":true,"status":200}]}"#).unwrap();
+    let config = Config {
+        hidden_fields: vec![
+            DisplayField::Error,
+            DisplayField::Provider,
+            DisplayField::Model,
+        ],
+        ..Default::default()
+    };
+    let doc = Doc::with_detail(&raw, &ExecutionDetail::from_route(&route, &raw), &config);
+    assert_eq!(
+        doc.rows.iter().map(|r| r.code.as_str()).collect::<Vec<_>>(),
+        ["429", "502", "200"]
+    );
+    assert_eq!(doc.rows[0].log, "rate\nfirst failure");
+    assert_eq!(doc.rows[1].log, "second failure\nmore details");
+    assert_eq!(doc.rows[2].log, fmt::BLANK);
+    assert!(
+        doc.rows
+            .iter()
+            .all(|r| r.provider == "Provider(friendly-key)" && r.model == "model")
+    );
+    assert!(doc.notice.is_empty());
+    assert_eq!(doc.rows[0].color, theme::RED);
+    assert_eq!(doc.rows[2].color, theme::GREEN);
+}
+
+#[test]
+fn repeated_attempts_are_not_deduplicated() {
+    let raw = row(r#"{"status":502,"err":"same error","model":"m","tries":2}"#);
+    let mut detail = ExecutionDetail::loading();
+    detail.attempts = vec![
+        Attempt {
+            status_code: Some(502),
+            model: "m".into(),
+            error: Some("same error".into()),
+            ..Default::default()
+        };
+        2
+    ];
+    let doc = Doc::with_detail(&raw, &detail, &Config::default());
+    assert_eq!(doc.rows.len(), 2);
+    assert_eq!(plain_text(&doc).matches("same error").count(), 2);
+}
+
+#[test]
+fn missing_status_is_not_fabricated_and_missing_reason_is_explicit() {
+    let config = Config::default();
+    let no_code = Doc::with_detail(
+        &row(r#"{"status":0,"err":"timeout"}"#),
+        &ExecutionDetail::loading(),
+        &config,
+    );
+    assert_eq!(no_code.rows[0].code, fmt::BLANK);
+    assert_eq!(no_code.rows[0].log, "timeout");
+    let no_reason = Doc::with_detail(
+        &row(r#"{"status":502}"#),
+        &ExecutionDetail::unavailable("没有 route_id"),
+        &config,
+    );
+    assert_eq!(no_reason.rows[0].log, "记录未提供错误原因");
+    assert!(no_reason.notice.contains("尝试日志不可用"));
+    let typed = Doc::with_detail(
+        &row(r#"{"status":429,"err_type":"rate_limit_error","err":"slow down"}"#),
+        &ExecutionDetail::loading(),
+        &config,
+    );
+    assert_eq!(typed.rows[0].log, "rate_limit_error\nslow down");
+    let unknown = Entry::from_attempt(&Attempt::default(), &config);
+    assert_eq!(unknown.code, fmt::BLANK);
+    assert_eq!(unknown.log, fmt::BLANK);
+    assert_eq!(unknown.color, theme::TEXT_DIM);
+}
+
+#[test]
+fn copy_preserves_long_multiline_errors_and_mapping_is_applied_once() {
+    let error = format!("  leading\n{}\ntrailing  ", "长错误".repeat(700));
+    let mut raw = row(r#"{"status":502,"model":"vendor/aa","providerName":"aa","agentName":"aa"}"#);
+    raw.error = Some(error.clone());
+    let alias = NameAlias {
+        from: "aa".into(),
+        to: "a".into(),
+    };
+    let config = Config {
+        model_aliases: vec![alias.clone()],
+        provider_aliases: vec![alias.clone()],
+        agent_aliases: vec![alias],
+        ..Default::default()
+    };
+    let detail = ExecutionDetail {
+        source: DetailSource::History,
+        attempts: vec![Attempt {
+            model: "vendor/aa".into(),
+            error: Some(error.clone()),
+            provider: Some("aa".into()),
+            provider_key: Some("aa-key".into()),
+            status_code: Some(502),
+            ..Default::default()
+        }],
+        route_error: None,
+        route_status: None,
+        notice: "历史错误摘要（可能不完整）".into(),
+    };
+    let doc = Doc::with_detail(&raw, &detail, &config);
+    assert_eq!(doc.rows.len(), 1);
+    assert_eq!(doc.rows[0].model, "a");
+    assert_eq!(doc.rows[0].provider, "a(aa-key)");
+    let text = plain_text(&doc);
+    assert_eq!(text.matches(&error).count(), 1);
+    assert!(text.contains("模型: a\n"));
+    assert!(text.ends_with('\n'));
+}
+
+#[test]
+fn trace_does_not_erase_a_selected_row_reason_it_did_not_contain() {
+    let raw = row(r#"{"status":502,"err":"ledger-only reason","model":"m"}"#);
+    let mut detail = ExecutionDetail::loading();
+    detail.attempts.push(Attempt {
+        status_code: Some(502),
+        model: "m".into(),
+        ..Default::default()
+    });
+    let doc = Doc::with_detail(&raw, &detail, &Config::default());
+    assert!(plain_text(&doc).contains("ledger-only reason"));
+}
+
+#[test]
+fn incomplete_trace_still_shows_the_known_final_result() {
+    let raw = row(r#"{"status":200,"model":"m","providerName":"p","tries":2}"#);
+    let mut detail = ExecutionDetail::loading();
+    detail.attempts.push(Attempt {
+        status_code: Some(429),
+        model: "m".into(),
+        provider: Some("p".into()),
+        error: Some("first failure".into()),
+        ..Default::default()
+    });
+    let doc = Doc::with_detail(&raw, &detail, &Config::default());
+    assert_eq!(
+        doc.rows.iter().map(|r| r.code.as_str()).collect::<Vec<_>>(),
+        ["429", "200"]
+    );
+    assert_eq!(doc.rows[1].log, fmt::BLANK);
+}
+
+#[test]
+fn route_error_is_kept_without_repeating_an_attempt_log() {
+    let raw = row(r#"{"status":502,"err":"route reason","model":"m"}"#);
+    let mut detail = ExecutionDetail::loading();
+    detail.route_status = Some(502);
+    detail.route_error = Some("route reason".into());
+    let doc = Doc::with_detail(&raw, &detail, &Config::default());
+    assert_eq!(doc.rows.len(), 1);
+    detail.route_error = Some("another route reason".into());
+    let doc = Doc::with_detail(&raw, &detail, &Config::default());
+    assert!(plain_text(&doc).contains("another route reason"));
+    assert_eq!(doc.rows.last().unwrap().provider, fmt::BLANK);
+    assert_eq!(doc.rows.last().unwrap().model, fmt::BLANK);
+}
+
+#[test]
+fn loading_unavailable_and_incomplete_history_remain_explicit() {
+    let raw = row(r#"{"status":200,"tries":2}"#);
+    let config = Config::default();
+    let doc = Doc::with_detail(&raw, &ExecutionDetail::loading(), &config);
+    assert!(doc.notice.contains("正在加载"));
+    assert_eq!(doc.rows[0].log, fmt::BLANK);
+    let mut detail = ExecutionDetail::unavailable("403 / 缓存过期");
+    assert!(
+        Doc::with_detail(&raw, &detail, &config)
+            .notice
+            .contains("403 / 缓存过期")
+    );
+    detail.source = DetailSource::History;
+    detail.notice = "历史错误摘要（可能不完整）；分页已截断".into();
+    let text = plain_text(&Doc::with_detail(&raw, &detail, &config));
+    assert!(text.contains("历史错误摘要（可能不完整）"));
+    assert!(text.contains("分页已截断"));
+    detail.source = DetailSource::Trace;
+    detail.notice = "近期缓存尝试记录（请求未结束或记录不完整）".into();
+    assert!(
+        Doc::with_detail(&raw, &detail, &config)
+            .notice
+            .contains("不完整")
+    );
+}
+
+#[test]
+fn one_click_hits_only_copy_or_close() {
+    let m = Popup::new(POPUP_W, POPUP_H, 1.0);
+    for button in [Button::Close, Button::Copy] {
+        let rect = button_rect(&m, button);
+        assert_eq!(
+            hit_button(&m, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0),
+            Some(button)
+        );
+    }
+    assert_eq!(
+        hit_button(&m, m.pad() + 10.0, m.height - m.footer_h() / 2.0),
+        None
+    );
+    assert_eq!(hit_button(&m, POPUP_W / 2.0, POPUP_H / 2.0), None);
+}
+
+#[test]
+fn table_columns_fit_the_window_and_scale_together() {
+    for width in [MIN_W, POPUP_W, 1000.0] {
+        let m = Popup::new(width, POPUP_H, 1.0);
+        let columns = m.columns();
+        assert_eq!(columns[0].x, m.pad());
+        assert!((columns[3].x + columns[3].w - (m.width - m.pad())).abs() < 0.001);
+        assert!(columns.windows(2).all(|c| c[0].x + c[0].w < c[1].x));
+        assert!(columns[3].w > columns[1].w && columns[3].w > columns[2].w);
+        let scaled = Popup::new(width * 2.0, POPUP_H * 2.0, 2.0);
+        for (a, b) in columns.into_iter().zip(scaled.columns()) {
+            assert_eq!(a.x * 2.0, b.x);
+            assert_eq!(a.w * 2.0, b.w);
+        }
+        assert_eq!(m.content_view_h() * 2.0, scaled.content_view_h());
+    }
+}
+
+fn wrap_chars(text: &str, width: f32) -> Vec<String> {
+    let columns = (width / 7.0).floor().max(1.0) as usize;
+    text.split('\n')
+        .flat_map(|line| {
+            let chars: Vec<_> = line.chars().collect();
+            if chars.is_empty() {
+                vec![String::new()]
+            } else {
+                chars
+                    .chunks(columns)
+                    .map(|chunk| chunk.iter().collect())
+                    .collect()
+            }
+        })
         .collect()
 }
 
-fn row() -> Row {
-    Row {
-        id: "gid://axonhub/Request/42899".into(),
-        account_id: String::new(),
-        account_name: String::new(),
-        created_at: Some("2026-09-18T11:28:03Z".into()),
-        updated_at: None,
-        status: Status::Failed,
-        model: "glm-5.3-flash".into(),
-        routed_model: None,
-        upstream_model: Some("openai/upstream-glm".into()),
-        channel: Some("ch-a".into()),
-        channel_api_key_index: Some(0),
-        channel_key_label: None,
-        caller: Some("cc".into()),
-        source: Some("api".into()),
-        client_ip: Some("::1".into()),
-        format: Some("chat".into()),
-        reasoning_effort: Some("max".into()),
-        upstream_format: Some("chat".into()),
-        pass_through: false,
-        stream: false,
-        latency_ms: Some(269_000),
-        first_token_ms: None,
-        reasoning_ms: None,
-        prompt_tokens: 900,
-        completion_tokens: 300,
-        reasoning_tokens: 0,
-        total_tokens: 1200,
-        cached_tokens: 0,
-        write_cached_tokens: 640,
-        total_cost: Some(0.1388096),
-        cost_items: vec![
-            CostItem {
-                item_code: "prompt_tokens".into(),
-                quantity: 900,
-                subtotal: 0.01,
-                tier_breakdown: Vec::new(),
-            },
-            CostItem {
-                item_code: "completion_tokens".into(),
-                quantity: 300,
-                subtotal: 0.02,
-                tier_breakdown: vec![TierCost {
-                    up_to: Some(1_000),
-                    units: 300,
-                    subtotal: 0.02,
-                }],
-            },
-        ],
-        attempt_count: 2,
-        failed_attempts: 1,
-        attempts_truncated: false,
-        error_status_code: Some(429),
-    }
-}
-
 #[test]
-fn parses_the_executions_query_answer() {
-    let found = executions();
-    assert_eq!(found.len(), 2);
-    assert_eq!(found[0].status(), Status::Canceled);
-    assert_eq!(found[1].status(), Status::Failed);
-    assert_eq!(found[1].response_status_code, Some(429));
-    assert_eq!(
-        found[1].channel.as_ref().and_then(|c| c.name.as_deref()),
-        Some("ch-a")
-    );
-}
-
-#[test]
-fn the_full_document_carries_every_channel_code_and_error() {
-    let doc = Doc::build(&row(), &executions(), 1_789_179_657, Depth::Full, &[], &[]);
-    let text = plain_text(&doc);
-
-    assert!(text.contains("调用者: cc"), "{text}");
-    assert!(text.contains("来源: api · ::1"), "{text}");
-    assert!(text.contains("费用: $0.1388"), "{text}");
-    // New routing/cost cells: the request overview strips the provider prefix,
-    // keeps the raw key index, and expands the cost items.
-    assert!(text.contains("上游模型: upstream-glm"), "{text}");
-    assert!(text.contains("渠道 Key: Key #0"), "{text}");
-    assert!(text.contains("写入 640"), "{text}");
-    assert!(text.contains("费用明细: 入 $0.0100 · 出 $0.0200"), "{text}");
-    assert!(text.contains("成本项: 输入 · 数量 900 · $0.0100"), "{text}");
-    assert!(
-        text.contains("成本项: 输出 · 数量 300 · $0.0200 · 阶梯 1.0k 300u $0.0200"),
-        "{text}"
-    );
-    // Each execution names its own actual upstream model and credential index.
-    assert!(text.contains("上游模型: upstream-a"), "{text}");
-    assert!(text.contains("上游模型: upstream-b"), "{text}");
-    assert!(text.contains("渠道 Key: Key #1"), "{text}");
-    assert!(text.contains("出 300"), "{text}");
-    assert!(text.contains("状态: 失败"), "{text}");
-    assert!(text.contains("模型: glm-5.3-flash(max)"), "{text}");
-    assert!(text.contains("执行 2 次"), "{text}");
-    assert!(text.contains("执行 1 · 已取消"), "{text}");
-    assert!(text.contains("执行 2 · 失败 · HTTP 429"), "{text}");
-    assert!(text.contains("渠道: ch-a(openai)"), "{text}");
-    assert!(text.contains("端点: http://10.0.0.1:18090/v1"), "{text}");
-    assert!(
-        text.contains("错误: Concurrency limit exceeded for account, please retry later"),
-        "{text}"
-    );
-    assert!(
-        text.contains("错误: failed to do request: HTTP request failed: context canceled"),
-        "{text}"
-    );
-    // Every line stands alone — a field never runs into the next heading,
-    // and a blank line separates one execution from the next.
-    assert!(
-        text.contains("context canceled\n\n执行 2 · 失败 · HTTP 429\n"),
-        "{text:?}"
-    );
-    assert!(
-        text.contains("地址: https://api.example.com/v1/chat/completions"),
-        "{text}"
-    );
-}
-
-#[test]
-fn the_compact_document_keeps_the_channel_code_model_and_error() {
-    let doc = Doc::build(
-        &row(),
-        &executions(),
-        1_789_179_657,
-        Depth::Compact,
-        &[],
-        &[],
-    );
-    let text = plain_text(&doc);
-
-    assert!(text.contains("执行 1 · 已取消"), "{text}");
-    assert!(text.contains("执行 2 · 失败"), "{text}");
-    assert!(text.contains("渠道: ch-b(openai)"), "{text}");
-    assert!(text.contains("渠道: ch-a(openai)"), "{text}");
-    assert!(text.contains("状态码: 429"), "{text}");
-    assert!(text.contains("模型: glm-5.3-flash(max)"), "{text}");
-    // The actual upstream model and key index stay visible per attempt, since
-    // they explain which credential and provider each retry used.
-    assert!(text.contains("上游模型: upstream-a"), "{text}");
-    assert!(text.contains("上游模型: upstream-b"), "{text}");
-    assert!(text.contains("渠道 Key: Key #0"), "{text}");
-    assert!(text.contains("渠道 Key: Key #1"), "{text}");
-    assert!(
-        text.contains("错误: Concurrency limit exceeded for account, please retry later"),
-        "{text}"
-    );
-    // Everything else is behind the toggle.
-    for hidden in [
-        "请求",
-        "调用者",
-        "协议",
-        "令牌",
-        "耗时",
-        "端点",
-        "地址",
-        "格式",
-        "HTTP 429",
-    ] {
-        assert!(
-            !text.contains(hidden),
-            "{hidden} leaked into the compact view: {text}"
-        );
-    }
-    // Every attempt gets a status row, even the one that never got a status
-    // line — there the value is left blank rather than a number.
-    assert_eq!(text.matches("状态码:").count(), 2, "{text}");
-    assert!(text.contains("状态码:\n"), "{text}");
-}
-
-#[test]
-fn a_request_without_executions_says_so() {
-    for depth in [Depth::Compact, Depth::Full] {
-        let doc = Doc::build(&row(), &[], 1_789_179_657, depth, &[], &[]);
-        let text = plain_text(&doc);
-        assert!(text.contains("没有记录到上游执行"), "{depth:?}: {text}");
-    }
-}
-
-#[test]
-fn the_four_new_fields_toggle_independently_in_the_document() {
-    let fields = [
-        (DisplayField::UpstreamModel, "上游模型:"),
-        (DisplayField::ChannelAPIKeyIndex, "渠道 Key:"),
-        (DisplayField::CacheWrite, "写入 640"),
-        (DisplayField::CostBreakdown, "费用明细:"),
+fn long_errors_wrap_inside_fixed_columns_and_rows_never_overlap() {
+    let raw = row(r#"{"status":502,"model":"m","providerName":"p","err":"short"}"#);
+    let mut detail = ExecutionDetail::loading();
+    detail.notice.clear();
+    detail.attempts = vec![
+        Attempt {
+            model: "m".into(),
+            provider: Some("p".into()),
+            status_code: Some(502),
+            error: Some("长错误".repeat(1000)),
+            ..Default::default()
+        },
+        Attempt {
+            model: "m".into(),
+            status_code: Some(429),
+            error: Some("last error".into()),
+            ..Default::default()
+        },
     ];
-    for (hidden_field, _) in fields {
-        let hidden = [hidden_field];
-        let doc = Doc::build(
-            &row(),
-            &executions(),
-            1_789_179_657,
-            Depth::Full,
-            &[],
-            &hidden,
-        );
-        let text = plain_text(&doc);
-        for (field, marker) in fields {
-            assert_eq!(
-                text.contains(marker),
-                field != hidden_field,
-                "hiding {hidden_field:?} should only remove its own marker ({marker}): {text}"
-            );
-        }
-        // Existing fields are untouched by the new switches.
-        assert!(text.contains("费用: $0.1388"), "{text}");
-        assert!(text.contains("模型: glm-5.3-flash(max)"), "{text}");
-    }
-}
-
-#[test]
-fn the_overview_does_not_apply_upstream_model_aliases_twice() {
-    let aliases = [ModelAlias {
-        from: "raw".into(),
-        to: "raw-x".into(),
-    }];
-    let mut request = row();
-    // App::rebuild has already applied aliases to the overview's row.
-    request.upstream_model = Some("raw-x".into());
-    let doc = Doc::build(&request, &[], 0, Depth::Full, &aliases, &[]);
-    let text = plain_text(&doc);
-    assert!(text.contains("上游模型: raw-x\n"), "{text}");
-    assert!(!text.contains("raw-x-x"), "{text}");
-}
-
-#[test]
-fn key_aliases_replace_the_overview_and_each_attempt_label() {
-    let mut request = row();
-    request.channel_key_label = Some("overview-key".into());
-    let mut attempts = executions();
-    attempts[0].channel_key_label = Some("first-key".into());
-    attempts[1].channel_key_label = Some("second-key".into());
-    let doc = Doc::build(&request, &attempts, 0, Depth::Full, &[], &[]);
-    let text = plain_text(&doc);
-    for label in ["overview-key", "first-key", "second-key"] {
-        assert!(text.contains(&format!("渠道 Key: {label}")), "{text}");
-    }
-    assert!(!text.contains("Key #"), "{text}");
-    let hidden = [DisplayField::ChannelAPIKeyIndex];
-    let doc = Doc::build(&request, &attempts, 0, Depth::Full, &[], &hidden);
-    assert!(!plain_text(&doc).contains("渠道 Key:"));
-}
-
-#[test]
-fn empty_new_fields_are_omitted_from_the_document() {
-    let mut empty = row();
-    empty.upstream_model = None;
-    empty.channel_api_key_index = None;
-    empty.write_cached_tokens = 0;
-    empty.cost_items.clear();
-    let doc = Doc::build(&empty, &[], 1_789_179_657, Depth::Full, &[], &[]);
-    let text = plain_text(&doc);
-    for marker in ["上游模型:", "渠道 Key:", "写入 ", "费用明细:", "成本项:"] {
-        assert!(!text.contains(marker), "{marker} leaked: {text}");
-    }
-    assert!(text.contains("费用: $0.1388"), "{text}");
-    assert!(text.contains("令牌:"), "{text}");
-}
-
-#[test]
-fn buttons_hit_where_they_are_drawn() {
-    let m = Popup::new(470.0, 430.0, 1.0);
-    for button in [Button::Close, Button::Toggle, Button::Copy, Button::Open] {
-        let r = button_rect(&m, button);
-        let hit = hit_button(&m, r.x + r.w / 2.0, r.y + r.h / 2.0);
-        assert_eq!(hit, Some(button), "{button:?} at {r:?}");
-    }
-    // The footer controls must not overlap: 完整信息 on the left, then 复制
-    // and 打开网页 on the right.
-    let toggle = button_rect(&m, Button::Toggle);
-    let copy = button_rect(&m, Button::Copy);
-    let open = button_rect(&m, Button::Open);
-    assert!(copy.x > toggle.x + toggle.w, "{toggle:?} vs {copy:?}");
-    assert!(open.x > copy.x + copy.w, "{copy:?} vs {open:?}");
-    // The body is not a button.
-    assert_eq!(hit_button(&m, m.width / 2.0, m.height / 2.0), None);
-    // The toggle names what clicking it shows.
-    assert_eq!(Button::Toggle.label(Depth::Compact), "完整信息");
-    assert_eq!(Button::Toggle.label(Depth::Full), "简化信息");
-}
-
-#[test]
-fn scaled_popup_keeps_its_proportions() {
-    let at_100 = Popup::new(470.0, 430.0, 1.0);
-    let at_150 = Popup::new(705.0, 645.0, 1.5);
-    assert_eq!(at_150.row_h(), at_100.row_h() * 1.5);
-    assert_eq!(at_150.content_top(), at_100.content_top() * 1.5);
-    let r = button_rect(&at_150, Button::Copy);
-    assert!(r.x + r.w <= at_150.width - at_150.pad() + 0.01);
-    assert!(r.y + r.h <= at_150.height + 0.01);
-    // The close button sits inside the header.
-    let c = button_rect(&at_150, Button::Close);
-    assert!(c.y + c.h <= at_150.header_h() + 0.01);
+    let doc = Doc::with_detail(&raw, &detail, &Config::default());
+    let m = Popup::new(MIN_W, POPUP_H, 1.0);
+    let table = layout(&m, &doc, wrap_chars);
+    assert!(table.height > m.content_view_h());
+    assert!(table.bands.windows(2).all(|r| r[0].y + r[0].h <= r[1].y));
+    assert!(
+        table
+            .visuals
+            .iter()
+            .all(|v| v.rect.x + v.rect.w <= m.width - m.pad() + 0.001)
+    );
+    assert!(table.visuals.iter().any(|v| v.text == "last error"));
+    assert!(
+        table
+            .visuals
+            .iter()
+            .all(|v| v.rect.y + v.rect.h <= table.height)
+    );
 }

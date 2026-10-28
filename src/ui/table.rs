@@ -1,41 +1,29 @@
 //! Table layout: one row per request, one column per visible cell.
 //!
-//! The card layouts drop a cell that does not fit; the table instead sizes every
-//! column to its widest text, so nothing is ever truncated, and reports the
-//! width it needs back to the caller, which widens the window to match. Colours
-//! and formatting mirror the cards, so the same request reads the same in
-//! either layout.
+//! Every column is sized to its widest text, so nothing is truncated, and the
+//! width the table needs is reported back to the caller, which widens the
+//! window to match.
 
 use windows::Win32::Graphics::GdiPlus::RectF;
 
 use crate::config::DisplayField;
 use crate::format as fmt;
-use crate::model::Row;
+use crate::model::{self, Protocol, Row};
 use crate::theme::{self, Painter};
 use crate::ui::layout::Metrics;
 use crate::ui::panel::{self, ListView};
 
-/// Horizontal padding inside a cell, on each side — so two paddings sit between
-/// adjacent columns' text. Deliberately tiny: the table is a dense listing, and
-/// the monospace face already leaves a bearing on either side of every glyph,
-/// which is what actually separates the columns.
+/// Horizontal padding inside a cell, on each side.
 const CELL_HPAD: f32 = 1.0;
 
-/// Headroom added to the rectangle a cell is drawn in. GDI+ trims text the
-/// moment the layout rectangle is narrower than the measured text — with no
-/// tolerance at all — and the cell rectangle is rebuilt from the column width
-/// by subtracting the padding, a round trip that can land a few ulps below the
-/// measure. Without the slack the widest cell of a column shows `…` on text
-/// that fits.
+/// Headroom added to the rectangle a cell is drawn in: GDI+ trims text the
+/// moment the layout rectangle is narrower than the measured text.
 const CELL_SLACK: f32 = 0.5;
 
-/// The status cell is a dot, not a word: the colour carries the state and the
-/// column stays one character wide. Drawn with the CJK face — see `is_cjk` —
-/// which is where a full-width `●` is guaranteed to live.
+/// The status cell is a dot, not a word.
 const STATUS_DOT: &str = "●";
 
-/// One table column: the status the cards encode in their accent bar, followed
-/// by one column per visible cell.
+/// One table column: the status dot, followed by one column per visible cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Column {
     Status,
@@ -43,71 +31,61 @@ enum Column {
 }
 
 impl Column {
-    /// Every column of the table, in draw order. Retry and channel-key columns
-    /// are dropped when none of the current rows has anything to show.
+    /// Every column of the table, in draw order. Columns with nothing to show
+    /// in the current rows are dropped.
     fn all(v: &ListView) -> Vec<Column> {
         let mut out = vec![Column::Status];
         for field in DisplayField::ALL {
             if !v.shows(field) {
                 continue;
             }
-            if field == DisplayField::Retry && !v.rows.iter().any(has_retry) {
-                continue;
+            let keep = match field {
+                DisplayField::Retry => v.rows.iter().any(has_retry),
+                DisplayField::Error => v.rows.iter().any(|row| error_code(row).is_some()),
+                DisplayField::UpstreamModel => v.rows.iter().any(|row| row.served_model.is_some()),
+                _ => true,
+            };
+            if keep {
+                out.push(Column::Field(field));
             }
-            if field == DisplayField::ChannelAPIKeyIndex
-                && !v.rows.iter().any(|row| row.channel_api_key_index.is_some())
-            {
-                continue;
-            }
-            out.push(Column::Field(field));
         }
         out
     }
 
     /// The cell's value, or `None` when the row has none for this column.
-    ///
-    /// Missing is not the same as empty: a request still in flight has no
-    /// cache rate, no speed and no latency yet. `text` answers with nothing,
-    /// so the cell stays blank until the value exists.
     fn value(self, row: &Row, now: i64) -> Option<String> {
         match self {
             Column::Status => Some(STATUS_DOT.into()),
             Column::Field(field) => match field {
-                // The three marks read like the card's: the character names the
-                // flag, the colour says whether it is set. With no header row
-                // there is nothing else to name the column, and 是/否 would be
-                // a value without a question.
-                DisplayField::Stream => Some("流".into()),
-                DisplayField::Conversion => Some("转".into()),
-                DisplayField::PassThrough => Some("透".into()),
                 DisplayField::Model => Some(row.display_model()),
-                DisplayField::UpstreamModel => panel::upstream_model_text(row),
-                DisplayField::Protocol => text(row.format.as_deref()),
-                DisplayField::Caller => text(row.caller.as_deref()),
-                DisplayField::Channel => text(row.channel.as_deref()),
-                DisplayField::ChannelAPIKeyIndex => panel::key_index_text(row),
+                DisplayField::UpstreamModel => row
+                    .served_model
+                    .as_deref()
+                    .map(model::short_model_name)
+                    .map(str::to_string),
+                DisplayField::Protocol => protocol_text(row),
+                DisplayField::Agent => text(row.agent.as_deref()),
+                DisplayField::Provider => row.provider_with_key(),
+                // Only reachable through an old config; the key now rides in
+                // the provider cell.
+                DisplayField::ProviderKey => text(row.provider_key.as_deref()),
                 DisplayField::Tokens => {
-                    (row.total_tokens > 0).then(|| fmt::tokens_compact(row.total_tokens))
+                    (row.total_tokens() > 0).then(|| fmt::tokens_compact(row.total_tokens()))
                 }
-                // A failed or canceled request has no cache rate to show, so
-                // the cell borrows the space for why it ended there: the HTTP
-                // status of its latest failed attempt.
-                DisplayField::Cache => row
-                    .cache_hit_rate()
-                    .map(|rate| format!("{rate:.2}%"))
-                    .or_else(|| row.error_status_code.map(|code| code.to_string())),
-                DisplayField::CacheWrite => panel::cache_write_text(row),
+                // Errors stay compact even if the failed attempt used cache.
+                DisplayField::Cache if row.status == model::Status::Failed => error_code(row),
+                DisplayField::Cache => row.cache_hit_rate().map(|rate| format!("{rate:.2}%")),
+                DisplayField::CacheWrite => (row.write_cached_tokens > 0)
+                    .then(|| format!("写 {}", fmt::tokens_compact(row.write_cached_tokens))),
                 DisplayField::Speed => row.tps().map(|tps| format!("{tps:.0} tps")),
-                DisplayField::Retry => {
-                    has_retry(row).then(|| format!("{}×", row.attempt_count - 1))
-                }
+                DisplayField::Retry => retry_text(row),
                 DisplayField::Cost => row.total_cost.map(fmt::cost),
-                DisplayField::CostBreakdown => row.cost_breakdown_text(),
                 DisplayField::Latency => fmt::latency(row.latency_ms, row.first_token_ms),
                 DisplayField::Completion => completion_text(row),
                 DisplayField::Source => source_text(row),
+                DisplayField::Error => error_code(row),
                 DisplayField::Account => text(Some(&row.account_name)),
-                DisplayField::CreatedAt => match row.created_at.as_deref() {
+                DisplayField::CreatedAt => match row.started_at.as_deref() {
                     Some(iso) if crate::time::parse_unix(iso).is_some() => {
                         Some(fmt::relative_time(Some(iso), now))
                     }
@@ -117,20 +95,17 @@ impl Column {
         }
     }
 
-    /// What the cell draws: its value, or nothing at all when the row does not
-    /// have one yet.
     fn text(self, row: &Row, now: i64) -> String {
         self.value(row, now).unwrap_or_default()
     }
 
-    /// The colour the cell is drawn with, matching the card layouts. A cell
-    /// with no value keeps the row's status colour — the same colour the first
-    /// column shows — so a missing reading still reads as "not yet".
+    /// The colour the cell is drawn with. A cell with no value keeps the row's
+    /// status colour, so a missing reading still reads as "not yet".
     fn color(
         self,
         row: &Row,
         v: &ListView,
-        channels: &[(&str, u32)],
+        providers: &[(&str, u32)],
         models: &[(&str, u32)],
     ) -> u32 {
         if self.value(row, v.now).is_none() {
@@ -139,57 +114,32 @@ impl Column {
         match self {
             Column::Status => theme::status_color(row.status),
             Column::Field(field) => match field {
-                DisplayField::Stream => {
-                    if row.stream {
-                        theme::WHITE
-                    } else {
-                        theme::TEXT_FAINT
-                    }
-                }
-                DisplayField::Conversion => {
-                    if row.protocol().is_converted() {
-                        theme::YELLOW
-                    } else {
-                        theme::GREEN
-                    }
-                }
-                DisplayField::PassThrough => {
-                    if row.pass_through {
-                        theme::GREEN
-                    } else {
-                        theme::GRAY
-                    }
-                }
                 DisplayField::Model => models
                     .iter()
                     .find(|(name, _)| *name == row.served_model())
                     .map(|(_, color)| *color)
                     .unwrap_or(theme::TEXT),
-                DisplayField::UpstreamModel => theme::TEXT_DIM,
-                DisplayField::Protocol => theme::TEXT_DIM,
-                DisplayField::Caller => theme::TEXT_FAINT,
-                DisplayField::Channel => channels
+                DisplayField::UpstreamModel | DisplayField::Protocol => theme::TEXT_DIM,
+                DisplayField::Agent => theme::TEXT_FAINT,
+                DisplayField::Provider => providers
                     .iter()
-                    .find(|(name, _)| Some(*name) == row.channel.as_deref())
+                    .find(|(name, _)| Some(*name) == row.provider.as_deref())
                     .map(|(_, color)| *color)
                     .unwrap_or(theme::CYAN),
-                DisplayField::ChannelAPIKeyIndex => theme::TEXT_FAINT,
+                DisplayField::ProviderKey => theme::TEXT_FAINT,
                 DisplayField::Tokens => theme::TEXT_DIM,
+                DisplayField::Cache if row.status == model::Status::Failed => theme::RED,
                 DisplayField::Cache => match row.cache_hit_rate() {
                     Some(_) if row.cache_hit_is_low() => theme::RED,
                     Some(_) => theme::GREEN,
-                    // No cache rate: the cell shows the failed attempt's
-                    // status code, which is the reason the request ended.
                     None => theme::RED,
                 },
-                DisplayField::CacheWrite => theme::TEXT_DIM,
-                DisplayField::Speed => theme::TEXT_DIM,
-                // Reached only when a retry count is on screen; a missing one
-                // was answered with the status dot above.
+                DisplayField::CacheWrite | DisplayField::Speed => theme::TEXT_DIM,
                 DisplayField::Retry => theme::RED,
-                DisplayField::Cost | DisplayField::CostBreakdown => theme::YELLOW,
+                DisplayField::Cost => theme::YELLOW,
                 DisplayField::Latency | DisplayField::Completion => theme::TEXT_DIM,
                 DisplayField::Source => theme::TEXT_FAINT,
+                DisplayField::Error => theme::RED,
                 DisplayField::Account => panel::account_color(v.accounts, &row.account_id),
                 DisplayField::CreatedAt => theme::TEXT_FAINT,
             },
@@ -197,18 +147,31 @@ impl Column {
     }
 }
 
-/// A retry happened only when the request was attempted more than once;
-/// a first attempt — or none yet — leaves the cell blank.
 fn has_retry(row: &Row) -> bool {
-    row.attempt_count > 1
+    row.tries > 1 || row.handed_on
 }
 
-/// A trimmed, non-empty reading, or `None` when the wire sent nothing.
+fn retry_text(row: &Row) -> Option<String> {
+    if row.handed_on {
+        return Some("交".into());
+    }
+    (row.tries > 1).then(|| format!("{}×", row.tries - 1))
+}
+
 fn text(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
         .filter(|text| !text.is_empty())
         .map(str::to_string)
+}
+
+/// `mess → chat`, or a single protocol name.
+fn protocol_text(row: &Row) -> Option<String> {
+    match row.protocol() {
+        Protocol::Same(name) | Protocol::Single(name) => Some(name),
+        Protocol::Converted { from, to } => Some(format!("{from} → {to}")),
+        Protocol::Unknown => None,
+    }
 }
 
 /// `出 1.2k 思 340`: completion tokens, with the reasoning share called out.
@@ -226,20 +189,25 @@ fn completion_text(row: &Row) -> Option<String> {
     Some(label)
 }
 
-/// `api · ::1`: the entry point and the client address, each shown on its own
-/// when the other is missing.
+/// `/v1/messages · host`: the client endpoint and the host it was sent to.
 fn source_text(row: &Row) -> Option<String> {
-    match (&row.source, &row.client_ip) {
-        (Some(source), Some(ip)) => Some(format!("{source} · {ip}")),
-        (Some(source), None) => Some(source.clone()),
-        (None, Some(ip)) => Some(ip.clone()),
+    match (&row.endpoint, &row.host) {
+        (Some(endpoint), Some(host)) => Some(format!("{endpoint} · {host}")),
+        (Some(endpoint), None) => Some(endpoint.clone()),
+        (None, Some(host)) => Some(host.clone()),
         (None, None) => None,
     }
 }
 
+/// Error messages belong in the popup; only the code affects table width.
+fn error_code(row: &Row) -> Option<String> {
+    row.status_code
+        .filter(|code| (100..600).contains(code) && row.status == model::Status::Failed)
+        .map(|code| code.to_string())
+}
+
 /// Width of every column: the widest cell under it, plus the padding on both
-/// sides. Pure so the fit can be exercised without a device context — `measure`
-/// is the real font metrics in production, a stub in tests.
+/// sides. Pure so the fit can be exercised without a device context.
 fn column_widths(
     rows: &[Row],
     columns: &[Column],
@@ -260,7 +228,7 @@ fn column_widths(
 }
 
 /// Draw the table and report the client width that fits it, or `None` when
-/// there is nothing to size — an empty list keeps the window it has.
+/// there is nothing to size.
 pub(super) fn draw(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) -> Option<f32> {
     if v.rows.is_empty() {
         panel::draw_empty(p, fonts, m, v);
@@ -273,10 +241,9 @@ pub(super) fn draw(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) 
         p.dual_measure(&fonts.small, text)
     });
 
-    let channels = panel::channel_palette(v.rows);
+    let providers = panel::provider_palette(v.rows);
     let models = panel::model_palette(v.rows);
 
-    // Clip so rows scroll inside the list area rather than over the chrome.
     let area = m.rows_area();
     p.clip(RectF {
         X: 0.0,
@@ -286,7 +253,7 @@ pub(super) fn draw(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) 
     });
 
     for index in 0..v.rows.len() {
-        let rect = m.card_rect(index, v.scroll);
+        let rect = m.row_rect(index, v.scroll);
         if rect.y + rect.h < area.y || rect.y > area.y + area.h {
             continue;
         }
@@ -303,7 +270,7 @@ pub(super) fn draw(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) 
                 rect.y,
                 width - hpad * 2.0 + CELL_SLACK * m.scale,
                 rect.h,
-                column.color(row, v, &channels, &models),
+                column.color(row, v, &providers, &models),
                 theme::ALIGN_NEAR,
             );
             x += width;
@@ -312,7 +279,6 @@ pub(super) fn draw(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) 
     }
     p.reset_clip();
 
-    // What the window must be for every column to fit, padding included.
     Some(m.pad() * 2.0 + widths.iter().sum::<f32>())
 }
 

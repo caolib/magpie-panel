@@ -1,6 +1,6 @@
-//! Value formatting that mirrors the AxonHub requests page.
+//! Compact value formatting for Magpie request tables.
 
-/// Compact token count for the primary line of a card.
+/// Compact token count for a table cell.
 pub fn tokens_compact(n: i64) -> String {
     if n <= 0 {
         return BLANK.into();
@@ -68,7 +68,7 @@ pub fn relative_time(iso: Option<&str>, now: i64) -> String {
     };
     let delta = now - then;
     if delta < 0 {
-        // Clock skew: AxonHub's clock is briefly ahead of ours, which shows
+        // Clock skew: the gateway's clock is briefly ahead of ours, which shows
         // up on brand-new (often still-processing) requests. Treat the instant
         // as just now instead of jumping to a wall-clock reading.
         return "0s".into();
@@ -85,43 +85,14 @@ pub fn relative_time(iso: Option<&str>, now: i64) -> String {
 
 /// `HH:MM:SS` in local time, derived from the wire's RFC3339 instant.
 pub fn local_clock(iso: Option<&str>) -> String {
-    // Convert from the parsed instant rather than the literal text: AxonHub
-    // sends `+08:00` timestamps whose date/time components are already local
-    // to the gateway, and feeding those to the timezone API again would shift
-    // them twice.
+    // Parse the instant first: interpreting offset date/time components as UTC
+    // would apply the timezone shift twice.
     let local = iso
         .and_then(crate::time::parse_unix)
         .and_then(crate::time::local_parts);
     match local {
         Some(p) => format!("{:02}:{:02}:{:02}", p.hour, p.minute, p.second),
         None => BLANK.into(),
-    }
-}
-
-/// `YYYY-MM-DD HH:MM:SS` in local time. The detail popup shows an absolute
-/// stamp, where a bare clock reading would be ambiguous about the day.
-pub fn local_datetime(iso: Option<&str>) -> String {
-    let local = iso
-        .and_then(crate::time::parse_unix)
-        .and_then(crate::time::local_parts);
-    match local {
-        Some(p) => format!(
-            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-            p.year, p.month, p.day, p.hour, p.minute, p.second
-        ),
-        None => BLANK.into(),
-    }
-}
-
-/// A coarse span, e.g. `45s` / `4m09s` / `1h02m`. Used for how long an upstream
-/// attempt took from start to the record being written.
-pub fn duration_span(seconds: i64) -> String {
-    if seconds < 60 {
-        format!("{seconds}s")
-    } else if seconds < 3600 {
-        format!("{}m{:02}s", seconds / 60, seconds % 60)
-    } else {
-        format!("{}h{:02}m", seconds / 3600, (seconds % 3600) / 60)
     }
 }
 

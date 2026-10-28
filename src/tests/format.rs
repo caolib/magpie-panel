@@ -38,7 +38,7 @@ fn clock_skew_does_not_produce_a_future_age() {
 fn missing_timestamp_is_blank() {
     assert_eq!(relative_time(None, BASE), BLANK);
     assert_eq!(relative_time(Some("garbage"), BASE), BLANK);
-    assert_eq!(local_datetime(None), BLANK);
+    assert_eq!(local_clock(None), BLANK);
 }
 
 #[test]
@@ -68,11 +68,4 @@ fn latency_keeps_tenths_only_while_seconds_read_better() {
     assert_eq!(latency(Some(60_000), None).as_deref(), Some("[1m00s]"));
     // And hours once minutes stop being readable.
     assert_eq!(latency(Some(3_725_000), None).as_deref(), Some("[1h02m]"));
-}
-
-#[test]
-fn spans_read_at_three_scales() {
-    assert_eq!(duration_span(45), "45s");
-    assert_eq!(duration_span(249), "4m09s");
-    assert_eq!(duration_span(3725), "1h02m");
 }

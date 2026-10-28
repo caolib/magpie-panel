@@ -1,97 +1,48 @@
-//! The error-detail popup: content model, layout and painting.
-//!
-//! The cards stay status-only; a failed or canceled request is the one case
-//! where the *reason* matters more than the summary, so clicking one opens this
-//! window. Content is assembled from the card's own row plus the upstream
-//! attempts AxonHub recorded for the request — a failed request usually has
-//! several, one per retry — and laid out as a scrolling document of sections
-//! and label/value rows.
-//!
-//! Geometry is authored at 96 DPI and multiplied by the scale, like the panel.
+//! Error and retry details: four columns, wrapped logs and copyable full text.
+//! The worker adds matched trace attempts or an incomplete ledger summary.
 
 use windows::Win32::Graphics::GdiPlus::RectF;
 
-use crate::config::{DisplayField, ModelAlias};
 use crate::format as fmt;
-use crate::model::{ExecutionDetail, Protocol, Row, display_model_name, short_model_name};
+use crate::model::{
+    Attempt, DetailSource, ExecutionDetail, Row, apply_aliases, display_model_name,
+};
 use crate::theme::{self, Fonts, Painter};
 use crate::ui::layout::Rect;
 
-/// Default size in logical pixels at 96 DPI, and the floor the window can be
-/// resized to. Each form gets the height it usually needs: the compact one is
-/// a handful of rows, so a full-height window would sit mostly empty.
-pub const POPUP_W: f32 = 470.0;
-pub const POPUP_H: f32 = 480.0;
-pub const POPUP_H_COMPACT: f32 = 340.0;
-pub const MIN_W: f32 = 360.0;
+pub const POPUP_W: f32 = 720.0;
+pub const POPUP_H: f32 = 400.0;
+pub const MIN_W: f32 = 420.0;
 pub const MIN_H: f32 = 220.0;
 
 const PAD: f32 = 10.0;
-const HEADER_H: f32 = 48.0;
-const FOOTER_H: f32 = 38.0;
-/// The label column. `value_x` starts after it and the value wraps there.
-const LABEL_W: f32 = 58.0;
+const HEADER_H: f32 = 30.0;
+const TABLE_HEADER_H: f32 = 24.0;
+const FOOTER_H: f32 = 32.0;
 const ROW_H: f32 = 17.0;
-/// Height of a section title, and of the air above it.
-const SECTION_H: f32 = 18.0;
-const GAP: f32 = 8.0;
+const CELL_PAD: f32 = 4.0;
+const COLUMN_GAP: f32 = 8.0;
 const BUTTON_H: f32 = 22.0;
 const CLOSE_W: f32 = 22.0;
 const COPY_W: f32 = 52.0;
-const OPEN_W: f32 = 72.0;
-/// Wide enough for 完整信息 / 简化信息, the widest toggle label.
-const TOGGLE_W: f32 = 76.0;
-const BUTTON_GAP: f32 = 8.0;
+const HEADERS: [&str; 4] = ["状态码", "供应商", "模型", "错误日志"];
 
-/// How much of an execution the document shows.
-///
-/// A failed request is usually read for four things — which channel answered,
-/// with what status code, on which model, and why it failed — so that is what
-/// the popup opens with. Everything else is one click away.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Depth {
-    Compact,
-    Full,
-}
-
-/// The window height `depth` is authored for. The window is refitted when the
-/// form changes, so neither one leaves the other's empty space behind.
-pub fn default_height(depth: Depth) -> f32 {
-    match depth {
-        Depth::Compact => POPUP_H_COMPACT,
-        Depth::Full => POPUP_H,
-    }
-}
-
-/// The popup's only controls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Button {
     Copy,
-    Open,
     Close,
-    /// Switches between the compact and the full document.
-    Toggle,
 }
 
 impl Button {
-    /// The toggle's label names what clicking it will show, so `depth` only
-    /// matters for that one button.
-    pub fn label(self, depth: Depth) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Button::Copy => "复制",
-            Button::Open => "打开网页",
-            // U+00D7: present in every face, unlike a heavier multiplication
-            // or cross glyph.
             Button::Close => "×",
-            Button::Toggle => match depth {
-                Depth::Compact => "完整信息",
-                Depth::Full => "简化信息",
-            },
         }
     }
 }
 
-/// Popup geometry for one draw, in device pixels.
+/// Geometry in device pixels; widths never depend on error text.
 #[derive(Debug, Clone, Copy)]
 pub struct Popup {
     pub width: f32,
@@ -101,69 +52,59 @@ pub struct Popup {
 
 impl Popup {
     pub fn new(width: f32, height: f32, scale: f32) -> Self {
-        Popup {
+        Self {
             width,
             height,
             scale: scale.max(0.25),
         }
     }
 
-    fn s(&self, v: f32) -> f32 {
-        v * self.scale
-    }
-
     pub fn pad(&self) -> f32 {
-        self.s(PAD)
+        PAD * self.scale
     }
 
     pub fn header_h(&self) -> f32 {
-        self.s(HEADER_H)
+        HEADER_H * self.scale
     }
 
     pub fn footer_h(&self) -> f32 {
-        self.s(FOOTER_H)
-    }
-
-    /// Top of the scrolling area.
-    pub fn content_top(&self) -> f32 {
-        self.header_h()
-    }
-
-    /// Height of the scrolling area, i.e. what is visible at once.
-    pub fn content_view_h(&self) -> f32 {
-        (self.height - self.header_h() - self.footer_h()).max(0.0)
-    }
-
-    pub fn label_w(&self) -> f32 {
-        self.s(LABEL_W)
+        FOOTER_H * self.scale
     }
 
     pub fn row_h(&self) -> f32 {
-        self.s(ROW_H)
+        ROW_H * self.scale
     }
 
-    pub fn section_h(&self) -> f32 {
-        self.s(SECTION_H)
+    pub fn content_top(&self) -> f32 {
+        self.header_h() + TABLE_HEADER_H * self.scale
     }
 
-    pub fn gap(&self) -> f32 {
-        self.s(GAP)
+    pub fn content_view_h(&self) -> f32 {
+        (self.height - self.content_top() - self.footer_h()).max(0.0)
     }
 
-    pub fn value_x(&self) -> f32 {
-        self.pad() + self.label_w()
-    }
-
-    pub fn value_w(&self) -> f32 {
-        (self.width - self.pad() * 2.0 - self.label_w()).max(20.0)
+    fn columns(&self) -> [Rect; 4] {
+        let gap = COLUMN_GAP * self.scale;
+        let available = (self.width - self.pad() * 2.0 - gap * 3.0).max(0.0);
+        let code = (48.0 * self.scale).min(available * 0.2);
+        let rest = available - code;
+        let widths = [code, rest * 0.23, rest * 0.25, rest * 0.52];
+        let mut x = self.pad();
+        widths.map(|w| {
+            let rect = Rect {
+                x,
+                y: 0.0,
+                w,
+                h: ROW_H * self.scale,
+            };
+            x += w + gap;
+            rect
+        })
     }
 }
 
-/// Where a control sits. Geometry only — no font measurement — so hit-testing
-/// and drawing cannot disagree.
 pub fn button_rect(m: &Popup, button: Button) -> Rect {
     let s = m.scale;
-    let footer_y = m.height - (m.footer_h() + BUTTON_H * s) / 2.0;
     match button {
         Button::Close => Rect {
             x: m.width - m.pad() - CLOSE_W * s,
@@ -171,637 +112,364 @@ pub fn button_rect(m: &Popup, button: Button) -> Rect {
             w: CLOSE_W * s,
             h: CLOSE_W * s,
         },
-        // The switch sits on the footer's left, away from the two actions.
-        Button::Toggle => Rect {
-            x: m.pad(),
-            y: footer_y,
-            w: TOGGLE_W * s,
+        Button::Copy => Rect {
+            x: m.width - m.pad() - COPY_W * s,
+            y: m.height - (m.footer_h() + BUTTON_H * s) / 2.0,
+            w: COPY_W * s,
             h: BUTTON_H * s,
         },
-        Button::Open | Button::Copy => {
-            let (w, offset) = match button {
-                Button::Open => (OPEN_W * s, 0.0),
-                _ => (COPY_W * s, (OPEN_W + BUTTON_GAP) * s),
-            };
-            Rect {
-                x: m.width - m.pad() - offset - w,
-                y: footer_y,
-                w,
-                h: BUTTON_H * s,
-            }
-        }
     }
 }
 
 pub fn hit_button(m: &Popup, x: f32, y: f32) -> Option<Button> {
-    [Button::Close, Button::Toggle, Button::Copy, Button::Open]
+    [Button::Close, Button::Copy]
         .into_iter()
         .find(|b| button_rect(m, *b).contains(x, y))
 }
 
-/// One row of the document.
-pub enum Line {
-    /// Section title, drawn in `color` with the body font.
-    Section(String, u32),
-    /// `label: value`; the value wraps under a hanging indent.
-    Field {
-        label: &'static str,
-        value: String,
-        color: u32,
-    },
-    /// A bare sentence, e.g. the loading or failure notice.
-    Note(String, u32),
-    Gap,
+pub struct Entry {
+    pub code: String,
+    pub provider: String,
+    pub model: String,
+    pub log: String,
+    color: u32,
+}
+
+impl Entry {
+    fn from_attempt(attempt: &Attempt, config: &crate::config::Config) -> Self {
+        let provider = attempt
+            .provider
+            .as_deref()
+            .map(|p| apply_aliases(p, &config.provider_aliases));
+        let provider = match (provider, attempt.provider_key.as_deref()) {
+            (Some(p), Some(k)) => format!("{p}({k})"),
+            (Some(p), None) => p,
+            (None, Some(k)) => format!("({k})"),
+            _ => fmt::BLANK.into(),
+        };
+        let reasons: Vec<_> = [
+            attempt.fail.as_deref(),
+            attempt.error_type.as_deref(),
+            attempt.error.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|text| !text.trim().is_empty())
+        .collect();
+        let failed = attempt.status_code.is_some_and(|s| s >= 400)
+            || !reasons.is_empty()
+            || attempt.handed_on;
+        Self {
+            code: attempt
+                .status_code
+                .filter(|s| (100..600).contains(s))
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| fmt::BLANK.into()),
+            provider,
+            model: if attempt.model.is_empty() {
+                fmt::BLANK.into()
+            } else {
+                display_model_name(&attempt.model, &config.model_aliases)
+            },
+            log: if reasons.is_empty() {
+                if failed {
+                    "记录未提供错误原因".into()
+                } else {
+                    fmt::BLANK.into()
+                }
+            } else {
+                reasons.join("\n")
+            },
+            color: if failed {
+                theme::RED
+            } else if attempt.done == Some(true)
+                && attempt.status_code.is_some_and(|s| (200..400).contains(&s))
+            {
+                theme::GREEN
+            } else {
+                theme::TEXT_DIM
+            },
+        }
+    }
+
+    fn from_row(row: &Row, config: &crate::config::Config) -> Self {
+        Self::from_attempt(
+            &Attempt {
+                model: row.model.clone(),
+                status_code: row.status_code,
+                error: row.error.clone(),
+                error_type: row.error_type.clone(),
+                provider: row.provider.clone(),
+                provider_key: row.provider_key.clone(),
+                handed_on: row.handed_on,
+                done: Some(row.status != crate::model::Status::Processing),
+                ..Default::default()
+            },
+            config,
+        )
+    }
+
+    fn cells(&self) -> [&str; 4] {
+        [&self.code, &self.provider, &self.model, &self.log]
+    }
 }
 
 pub struct Doc {
-    pub lines: Vec<Line>,
+    pub rows: Vec<Entry>,
+    /// Loading, missing data and incomplete history stay explicit, not extra columns.
+    pub notice: String,
 }
 
 impl Doc {
-    /// Assemble the popup's content. `executions` may be empty — nothing was
-    /// recorded, or the request failed before an attempt — or hold several:
-    /// AxonHub retries the next channel, and the reason for each attempt is the
-    /// point of this view.
-    pub fn build(
-        row: &Row,
-        executions: &[ExecutionDetail],
-        now: i64,
-        depth: Depth,
-        aliases: &[ModelAlias],
-        hidden_fields: &[DisplayField],
-    ) -> Doc {
-        let mut lines = Vec::new();
-        if depth == Depth::Full {
-            lines.push(Line::Section("请求".into(), theme::TEXT_DIM));
-            lines.push(field(
-                "状态",
-                row.status.label(),
-                theme::status_color(row.status),
-            ));
-            lines.push(field("模型", row.display_model(), theme::TEXT));
-            if shows(hidden_fields, DisplayField::UpstreamModel)
-                && let Some(model) = non_empty(&row.upstream_model)
-            {
-                lines.push(field("上游模型", short_model_name(&model), theme::TEXT_DIM));
-            }
-            if let Some(channel) = non_empty(&row.channel) {
-                lines.push(field("渠道", channel, theme::CYAN));
-            }
-            if shows(hidden_fields, DisplayField::ChannelAPIKeyIndex)
-                && let Some(index) = row.channel_api_key_index
-            {
-                lines.push(field(
-                    "渠道 Key",
-                    key_index_text(index, row.channel_key_label.as_deref()),
-                    theme::TEXT_DIM,
-                ));
-            }
-            if let Some(caller) = non_empty(&row.caller) {
-                lines.push(field("调用者", caller, theme::TEXT_DIM));
-            }
-            if let Some(origin) = origin_text(row) {
-                lines.push(field("来源", origin, theme::TEXT_DIM));
-            }
-            lines.push(field("协议", protocol_text(row), theme::TEXT_DIM));
-            lines.push(field("流式", yes_no(row.stream), theme::TEXT_DIM));
-            lines.push(field(
-                "令牌",
-                tokens_text(row, shows(hidden_fields, DisplayField::CacheWrite)),
-                theme::TEXT_DIM,
-            ));
-            lines.push(field("耗时", timing_text(row), theme::TEXT_DIM));
-            if let Some(cost) = row.total_cost {
-                lines.push(field("费用", fmt::cost(cost), theme::TEXT_DIM));
-            }
-            if shows(hidden_fields, DisplayField::CostBreakdown) {
-                push_cost_breakdown(&mut lines, row);
-            }
-            lines.push(field(
-                "时间",
-                format!(
-                    "{} · {}",
-                    fmt::local_datetime(row.created_at.as_deref()),
-                    fmt::relative_time(row.created_at.as_deref(), now)
-                ),
-                theme::TEXT_DIM,
-            ));
-            if row.updated_at.is_some() && row.updated_at != row.created_at {
-                lines.push(field(
-                    "更新",
-                    fmt::local_datetime(row.updated_at.as_deref()),
-                    theme::TEXT_DIM,
-                ));
-            }
-            lines.push(Line::Gap);
-        }
-
-        if executions.is_empty() {
-            // Without attempts the compact view would open empty, so it says so
-            // instead.
-            if depth == Depth::Full {
-                lines.push(Line::Section("执行".into(), theme::TEXT_DIM));
-            }
-            lines.push(Line::Note("没有记录到上游执行".into(), theme::TEXT_FAINT));
-            return Doc { lines };
-        }
-
-        if depth == Depth::Full {
-            lines.push(Line::Section(
-                format!("执行 {} 次", executions.len()),
-                theme::TEXT_DIM,
-            ));
-        }
-        for (index, execution) in executions.iter().enumerate() {
-            push_execution(&mut lines, index, execution, depth, aliases, hidden_fields);
-        }
-        Doc { lines }
-    }
-}
-
-/// Whether a document field is enabled. New routing/cost fields respect the
-/// same switches as the cards; everything older stays always visible, so the
-/// popup keeps its existing behaviour.
-fn shows(hidden_fields: &[DisplayField], field: DisplayField) -> bool {
-    !hidden_fields.contains(&field)
-}
-
-/// A mapped credential name, or the raw index AxonHub reported.
-fn key_index_text(index: i64, alias: Option<&str>) -> String {
-    alias
-        .filter(|label| !label.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("Key #{index}"))
-}
-
-/// Compact per-category costs, then one line per item with its quantity,
-/// subtotal and tier breakdown (when the provider reported tiers).
-fn push_cost_breakdown(lines: &mut Vec<Line>, row: &Row) {
-    if let Some(summary) = row.cost_breakdown_text() {
-        lines.push(field("费用明细", summary, theme::TEXT_DIM));
-    }
-    for item in &row.cost_items {
-        if item.quantity <= 0 && item.subtotal <= 0.0 {
-            continue;
-        }
-        let mut value = format!(
-            "{} · 数量 {} · {}",
-            item.label(),
-            item.quantity,
-            fmt::cost(item.subtotal)
-        );
-        if !item.tier_breakdown.is_empty() {
-            let tiers: Vec<String> = item
-                .tier_breakdown
-                .iter()
-                .map(|tier| {
-                    let up_to = tier
-                        .up_to
-                        .map(fmt::tokens_compact)
-                        .unwrap_or_else(|| "∞".into());
-                    format!("{up_to} {}u {}", tier.units, fmt::cost(tier.subtotal))
+    pub fn with_detail(
+        raw: &Row,
+        detail: &ExecutionDetail,
+        config: &crate::config::Config,
+    ) -> Self {
+        let mut rows: Vec<_> = detail
+            .attempts
+            .iter()
+            .map(|a| Entry::from_attempt(a, config))
+            .collect();
+        // Show the selected ledger row immediately, or retain a reason the trace
+        // did not contain. Do not repeat a final summary already in the attempts.
+        let missing_reason = [raw.error.as_deref(), raw.error_type.as_deref()]
+            .into_iter()
+            .flatten()
+            .filter(|e| !e.trim().is_empty())
+            .any(|reason| {
+                !detail.attempts.iter().any(|a| {
+                    [
+                        a.error.as_deref(),
+                        a.error_type.as_deref(),
+                        a.fail.as_deref(),
+                    ]
+                    .contains(&Some(reason))
                 })
-                .collect();
-            value.push_str(&format!(" · 阶梯 {}", tiers.join(" / ")));
+            });
+        let selected_recorded = detail.attempts.iter().any(|a| {
+            a.status_code == raw.status_code
+                && (a.model == raw.model || a.model.is_empty())
+                && raw
+                    .provider
+                    .as_deref()
+                    .is_none_or(|provider| a.provider.as_deref().is_none_or(|p| p == provider))
+                && raw
+                    .provider_key
+                    .as_deref()
+                    .is_none_or(|key| a.provider_key.as_deref().is_none_or(|k| k == key))
+        });
+        if rows.is_empty() || missing_reason || !selected_recorded {
+            rows.push(Entry::from_row(raw, config));
         }
-        lines.push(field("成本项", value, theme::TEXT_DIM));
-    }
-}
-
-fn field(label: &'static str, value: impl Into<String>, color: u32) -> Line {
-    Line::Field {
-        label,
-        value: value.into(),
-        color,
-    }
-}
-
-fn push_execution(
-    lines: &mut Vec<Line>,
-    index: usize,
-    ex: &ExecutionDetail,
-    depth: Depth,
-    aliases: &[ModelAlias],
-    hidden_fields: &[DisplayField],
-) {
-    let status = ex.status();
-    let mut title = format!("执行 {} · {}", index + 1, status.label());
-    // The compact view keeps the code for its own row, so the heading names the
-    // outcome only.
-    if depth == Depth::Full
-        && let Some(code) = ex.response_status_code
-    {
-        title.push_str(&format!(" · HTTP {code}"));
-    }
-    lines.push(Line::Section(title, theme::status_color(status)));
-
-    if let Some(channel) = ex.channel.as_ref() {
-        let name = non_empty(&channel.name).unwrap_or_default();
-        let kind = non_empty(&channel.kind).unwrap_or_default();
-        let label = match (name.is_empty(), kind.is_empty()) {
-            (false, false) => format!("{name}({kind})"),
-            (false, true) => name,
-            (true, false) => kind,
-            (true, true) => String::new(),
-        };
-        if !label.is_empty() {
-            lines.push(field("渠道", label, theme::CYAN));
-        }
-        if depth == Depth::Full
-            && let Some(base) = non_empty(&channel.base_url)
+        if let Some(error) = detail
+            .route_error
+            .as_deref()
+            .filter(|e| !e.trim().is_empty())
+            && !rows.iter().any(|r| r.log.contains(error))
         {
-            lines.push(field("端点", base, theme::TEXT_DIM));
+            let mut entry = Entry::from_row(raw, config);
+            entry.code = detail
+                .route_status
+                .filter(|s| (100..600).contains(s))
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| fmt::BLANK.into());
+            // A route-level reason cannot identify one supplier/model attempt.
+            entry.provider = fmt::BLANK.into();
+            entry.model = fmt::BLANK.into();
+            entry.log = error.into();
+            entry.color = theme::RED;
+            rows.push(entry);
         }
-    }
-
-    // What the compact view is for: which channel answered, with what code, on
-    // which model, and why it failed.
-    if depth == Depth::Compact {
-        lines.push(field("状态码", status_code_text(ex), status_code_color(ex)));
-        if let Some(model) = non_empty(&ex.model_id) {
-            let model = display_model_name(&model, aliases);
-            lines.push(field("模型", with_effort(model, ex), theme::TEXT));
-        }
-        push_execution_routing(lines, ex, aliases, hidden_fields);
-        if let Some(message) = non_empty(&ex.error_message) {
-            lines.push(field("错误", message, theme::RED));
-        }
-        lines.push(Line::Gap);
-        return;
-    }
-
-    if let Some(model) = non_empty(&ex.model_id) {
-        let model = display_model_name(&model, aliases);
-        lines.push(field("模型", with_effort(model, ex), theme::TEXT));
-    }
-    push_execution_routing(lines, ex, aliases, hidden_fields);
-    if let Some(span) = span_text(ex.created_at.as_deref(), ex.updated_at.as_deref()) {
-        lines.push(field("时间", span, theme::TEXT_DIM));
-    }
-    if let Some(url) = non_empty(&ex.request_url) {
-        lines.push(field("地址", url, theme::TEXT_DIM));
-    }
-    if let Some(timing) = execution_timing(ex) {
-        lines.push(field("耗时", timing, theme::TEXT_DIM));
-    }
-    if let Some(format) = non_empty(&ex.format) {
-        let mut text = format;
-        if ex.pass_through_applied.unwrap_or(false) {
-            text.push_str(" · 透传");
-        }
-        lines.push(field("格式", text, theme::TEXT_DIM));
-    }
-    if let Some(message) = non_empty(&ex.error_message) {
-        lines.push(field("错误", message, theme::RED));
-    }
-    lines.push(Line::Gap);
-}
-
-/// The actual upstream model and the channel key index for one attempt.
-fn push_execution_routing(
-    lines: &mut Vec<Line>,
-    ex: &ExecutionDetail,
-    aliases: &[ModelAlias],
-    hidden_fields: &[DisplayField],
-) {
-    if shows(hidden_fields, DisplayField::UpstreamModel)
-        && let Some(model) = non_empty(&ex.upstream_model_id)
-    {
-        lines.push(field(
-            "上游模型",
-            display_model_name(&model, aliases),
-            theme::TEXT_DIM,
-        ));
-    }
-    if shows(hidden_fields, DisplayField::ChannelAPIKeyIndex)
-        && let Some(index) = ex.channel_api_key_index
-    {
-        lines.push(field(
-            "渠道 Key",
-            key_index_text(index, ex.channel_key_label.as_deref()),
-            theme::TEXT_DIM,
-        ));
+        let notice = match detail.source {
+            DetailSource::Trace
+                if !detail.notice.contains("不完整") && !detail.notice.contains("未结束") =>
+            {
+                String::new()
+            }
+            _ => detail.notice.clone(),
+        };
+        Self { rows, notice }
     }
 }
 
-/// `glm-5.2(max)`: the model an attempt ran on, with its reasoning effort.
-fn with_effort(model: String, ex: &ExecutionDetail) -> String {
-    match non_empty(&ex.reasoning_effort) {
-        Some(effort) => format!("{model}({effort})"),
-        None => model,
-    }
-}
-
-fn status_code_text(ex: &ExecutionDetail) -> String {
-    match ex.response_status_code {
-        Some(code) => code.to_string(),
-        None => fmt::BLANK.into(),
-    }
-}
-
-/// Red for a refusal the upstream reported, green for a success, faint when the
-/// attempt never got a status line at all.
-fn status_code_color(ex: &ExecutionDetail) -> u32 {
-    match ex.response_status_code {
-        Some(code) if code >= 400 => theme::RED,
-        Some(_) => theme::GREEN,
-        None => theme::TEXT_DIM,
-    }
-}
-
-/// The document as copyable text: what `复制` and Ctrl+C put on the clipboard.
+/// Copy keeps each error's original whitespace and line breaks.
 pub fn plain_text(doc: &Doc) -> String {
     let mut out = String::new();
-    for line in &doc.lines {
-        match line {
-            Line::Section(text, _) | Line::Note(text, _) => {
-                out.push_str(text);
-                out.push('\n');
+    if !doc.notice.is_empty() {
+        out.push_str(&doc.notice);
+        out.push('\n');
+    }
+    for (index, row) in doc.rows.iter().enumerate() {
+        if index > 0 {
+            out.push('\n');
+        }
+        for (label, value) in HEADERS.into_iter().zip(row.cells()) {
+            out.push_str(label);
+            out.push(':');
+            if !value.is_empty() {
+                out.push(' ');
+                out.push_str(value);
             }
-            Line::Field { label, value, .. } => {
-                out.push_str(label);
-                out.push(':');
-                if !value.is_empty() {
-                    out.push(' ');
-                    out.push_str(value);
-                }
-                out.push('\n');
-            }
-            Line::Gap => out.push('\n'),
+            out.push('\n');
         }
     }
     out
 }
 
-fn non_empty(value: &Option<String>) -> Option<String> {
-    value
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(str::to_string)
-}
-
-fn yes_no(value: bool) -> &'static str {
-    if value { "是" } else { "否" }
-}
-
-/// How the inbound and upstream protocols relate. Unlike the card's 转 mark,
-/// the popup can spell both sides out.
-fn protocol_text(row: &Row) -> String {
-    match row.protocol() {
-        Protocol::Same(one) | Protocol::Single(one) => one,
-        Protocol::Converted { from, to } => format!("{from} → {to}"),
-        Protocol::Unknown => fmt::BLANK.into(),
-    }
-}
-
-fn tokens_text(row: &Row, show_cache_write: bool) -> String {
-    if row.total_tokens <= 0 {
-        return fmt::BLANK.into();
-    }
-    let mut text = format!(
-        "总 {} · 入 {}",
-        fmt::tokens_compact(row.total_tokens),
-        fmt::tokens_compact(row.prompt_tokens)
-    );
-    if row.completion_tokens > 0 {
-        text.push_str(&format!(
-            " · 出 {}",
-            fmt::tokens_compact(row.completion_tokens)
-        ));
-    }
-    if row.reasoning_tokens > 0 {
-        text.push_str(&format!(
-            " · 思考 {}",
-            fmt::tokens_compact(row.reasoning_tokens)
-        ));
-    }
-    if let Some(rate) = row.cache_hit_rate() {
-        text.push_str(&format!(" · 缓存 {rate:.1}%"));
-    }
-    if show_cache_write && row.write_cached_tokens > 0 {
-        text.push_str(&format!(
-            " · 写入 {}",
-            fmt::tokens_compact(row.write_cached_tokens)
-        ));
-    }
-    text
-}
-
-/// `api · ::1`: where the request entered, and the address it came from.
-fn origin_text(row: &Row) -> Option<String> {
-    match (&row.source, &row.client_ip) {
-        (Some(source), Some(ip)) => Some(format!("{source} · {ip}")),
-        (Some(source), None) => Some(source.clone()),
-        (None, Some(ip)) => Some(ip.clone()),
-        (None, None) => None,
-    }
-}
-
-fn timing_text(row: &Row) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(ms) = row.first_token_ms {
-        parts.push(format!("首字 {:.1}s", ms as f64 / 1000.0));
-    }
-    if let Some(ms) = row.latency_ms {
-        parts.push(format!("总 {:.1}s", ms as f64 / 1000.0));
-    }
-    if let Some(ms) = row.reasoning_ms {
-        parts.push(format!("推理 {:.1}s", ms as f64 / 1000.0));
-    }
-    if let Some(tps) = row.tps() {
-        parts.push(format!("{tps:.0} tps"));
-    }
-    if parts.is_empty() {
-        fmt::BLANK.into()
-    } else {
-        parts.join(" · ")
-    }
-}
-
-/// From an attempt starting to its record being written. The end timestamp is
-/// when AxonHub finished writing, so the span is an upper bound on the attempt
-/// itself — still the only duration an execution carries.
-fn span_text(created: Option<&str>, updated: Option<&str>) -> Option<String> {
-    let start = created.and_then(crate::time::parse_unix)?;
-    let clock = fmt::local_clock(created);
-    let Some(end) = updated.and_then(crate::time::parse_unix) else {
-        return Some(clock);
-    };
-    if end <= start {
-        return Some(clock);
-    }
-    Some(format!(
-        "{clock} → {} · {}",
-        fmt::local_clock(updated),
-        fmt::duration_span(end - start)
-    ))
-}
-
-fn execution_timing(ex: &ExecutionDetail) -> Option<String> {
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(ms) = ex.metrics_first_token_latency_ms {
-        parts.push(format!("首字 {:.1}s", ms as f64 / 1000.0));
-    }
-    if let Some(ms) = ex.metrics_reasoning_duration_ms {
-        parts.push(format!("推理 {:.1}s", ms as f64 / 1000.0));
-    }
-    (!parts.is_empty()).then(|| parts.join(" · "))
-}
-
-/// What the window needs to paint one frame.
 pub struct View<'a> {
-    pub row: &'a Row,
-    /// `None` until the executions arrive.
-    pub doc: Option<&'a Doc>,
-    /// Why the fetch failed; shown instead of the document.
-    pub error: Option<&'a str>,
-    /// Which form the document is in; drives the toggle's label.
-    pub depth: Depth,
+    pub doc: &'a Doc,
     pub scroll: f32,
     pub hover: Option<Button>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Kind {
-    Section,
-    Label,
-    Value,
-    Note,
-}
-
-/// One drawable string, positioned relative to the top of the content area.
 struct Visual {
-    kind: Kind,
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
+    rect: Rect,
     text: String,
     color: u32,
 }
 
-/// Paint the popup and return the content height, so the caller can clamp the
-/// scroll offset without laying the document out a second time.
+struct TableLayout {
+    visuals: Vec<Visual>,
+    bands: Vec<Rect>,
+    height: f32,
+}
+
+/// The same row-height calculation drives painting and pure geometry tests.
+fn layout(m: &Popup, doc: &Doc, wrap: impl Fn(&str, f32) -> Vec<String>) -> TableLayout {
+    let mut visuals = Vec::new();
+    let mut bands = Vec::new();
+    let row_h = ROW_H * m.scale;
+    let cell_pad = CELL_PAD * m.scale;
+    let mut y = cell_pad;
+    if !doc.notice.is_empty() {
+        for text in wrap(&doc.notice, m.width - m.pad() * 2.0) {
+            visuals.push(Visual {
+                rect: Rect {
+                    x: m.pad(),
+                    y,
+                    w: m.width - m.pad() * 2.0,
+                    h: row_h,
+                },
+                text,
+                color: theme::TEXT_FAINT,
+            });
+            y += row_h;
+        }
+        y += cell_pad;
+    }
+    let columns = m.columns();
+    for row in &doc.rows {
+        let cells = row
+            .cells()
+            .into_iter()
+            .zip(columns)
+            .map(|(text, rect)| (wrap(text, rect.w), rect))
+            .collect::<Vec<_>>();
+        let height = cells
+            .iter()
+            .map(|(lines, _)| lines.len())
+            .max()
+            .unwrap_or(1)
+            .max(1) as f32
+            * row_h
+            + cell_pad * 2.0;
+        bands.push(Rect {
+            x: m.pad(),
+            y,
+            w: m.width - m.pad() * 2.0,
+            h: height,
+        });
+        for (index, (lines, column)) in cells.into_iter().enumerate() {
+            let color = match index {
+                0 | 3 => row.color,
+                1 => theme::CYAN,
+                _ => theme::TEXT,
+            };
+            for (line, text) in lines.into_iter().enumerate() {
+                visuals.push(Visual {
+                    rect: Rect {
+                        y: y + cell_pad + line as f32 * row_h,
+                        ..column
+                    },
+                    text,
+                    color,
+                });
+            }
+        }
+        y += height;
+    }
+    TableLayout {
+        visuals,
+        bands,
+        height: y + cell_pad,
+    }
+}
+
 pub fn draw(p: &Painter, fonts: &Fonts, m: &Popup, v: &View) -> f32 {
     p.fill_rect(0.0, 0.0, m.width, m.height, theme::BG);
-    draw_edge(p, m);
-    p.fill_rect(0.0, m.header_h() - 1.0, m.width, 1.0, theme::SEPARATOR);
-    p.fill_rect(0.0, m.height - m.footer_h(), m.width, 1.0, theme::SEPARATOR);
-    draw_header(p, fonts, m, v);
-    draw_footer(p, fonts, m, v);
-    draw_body(p, fonts, m, v)
-}
-
-fn draw_edge(p: &Painter, m: &Popup) {
-    let c = theme::with_alpha(theme::BORDER, 0xE0);
-    let t = m.scale.max(1.0);
-    p.fill_rect(0.0, 0.0, m.width, t, c);
-    p.fill_rect(0.0, m.height - t, m.width, t, c);
-    p.fill_rect(0.0, 0.0, t, m.height, c);
-    p.fill_rect(m.width - t, 0.0, t, m.height, c);
-}
-
-fn draw_header(p: &Painter, fonts: &Fonts, m: &Popup, v: &View) {
-    let s = m.scale;
-    let line_h = m.row_h();
-    let y = m.pad() + 2.0 * s;
-
-    let status = v.row.status.label();
-    let width = p.dual_measure(&fonts.body, status);
+    let edge = m.scale.max(1.0);
+    let border = theme::with_alpha(theme::BORDER, 0xE0);
+    p.fill_rect(0.0, 0.0, m.width, edge, border);
+    p.fill_rect(0.0, m.height - edge, m.width, edge, border);
+    p.fill_rect(0.0, 0.0, edge, m.height, border);
+    p.fill_rect(m.width - edge, 0.0, edge, m.height, border);
     p.dual_text(
         &fonts.body,
-        status,
+        "错误日志",
         m.pad(),
-        y,
-        width,
-        line_h,
-        theme::status_color(v.row.status),
-        theme::ALIGN_NEAR,
-    );
-
-    // The model, unless the status word already fills the row.
-    let x = m.pad() + width + 6.0 * s;
-    let model = v.row.display_model();
-    let model_w = (m.width - m.pad() * 2.0 - CLOSE_W * s - 8.0 * s - (x - m.pad())).max(0.0);
-    p.dual_text(
-        &fonts.body,
-        &model,
-        x,
-        y,
-        model_w,
-        line_h,
+        5.0 * m.scale,
+        m.width - m.pad() * 2.0 - CLOSE_W * m.scale,
+        ROW_H * m.scale,
         theme::TEXT,
         theme::ALIGN_NEAR,
     );
-
-    // The request GUID, so it can be read off and pasted elsewhere.
-    let sub_w = (m.width - m.pad() * 2.0 - CLOSE_W * s - 8.0 * s).max(0.0);
-    p.dual_text(
-        &fonts.small,
-        &v.row.id,
-        m.pad(),
-        y + line_h + 2.0 * s,
-        sub_w,
-        line_h,
-        theme::TEXT_FAINT,
-        theme::ALIGN_NEAR,
-    );
-
-    let rect = button_rect(m, Button::Close);
-    let hovered = v.hover == Some(Button::Close);
-    if hovered {
-        p.round_rect(
-            rect.x,
-            rect.y,
-            rect.w,
-            rect.h,
-            4.0 * s,
-            theme::CARD_HOVER,
-            true,
+    for (label, column) in HEADERS.into_iter().zip(m.columns()) {
+        p.dual_text(
+            &fonts.small,
+            label,
+            column.x,
+            m.header_h() + 3.0 * m.scale,
+            column.w,
+            column.h,
+            theme::TEXT_DIM,
+            theme::ALIGN_NEAR,
         );
     }
-    let label = Button::Close.label(v.depth);
-    let w = p.dual_measure(&fonts.body, label);
-    p.dual_text(
-        &fonts.body,
-        label,
-        rect.x + (rect.w - w) / 2.0,
-        rect.y + (rect.h - line_h) / 2.0,
-        w,
-        line_h,
-        if hovered { theme::RED } else { theme::TEXT_DIM },
-        theme::ALIGN_NEAR,
+    p.fill_rect(
+        m.pad(),
+        m.content_top() - edge,
+        m.width - m.pad() * 2.0,
+        edge,
+        theme::SEPARATOR,
     );
-}
-
-fn draw_footer(p: &Painter, fonts: &Fonts, m: &Popup, v: &View) {
-    let s = m.scale;
-    for button in [Button::Toggle, Button::Copy, Button::Open] {
+    for button in [Button::Close, Button::Copy] {
         let rect = button_rect(m, button);
         let hovered = v.hover == Some(button);
-        p.round_rect(
-            rect.x,
-            rect.y,
-            rect.w,
-            rect.h,
-            4.0 * s,
-            if hovered {
-                theme::CARD_HOVER
-            } else {
-                theme::CARD
-            },
-            true,
-        );
-        let label = button.label(v.depth);
+        if button == Button::Copy || hovered {
+            p.round_rect(
+                rect.x,
+                rect.y,
+                rect.w,
+                rect.h,
+                4.0 * m.scale,
+                if hovered {
+                    theme::CARD_HOVER
+                } else {
+                    theme::CARD
+                },
+                true,
+            );
+        }
+        let label = button.label();
         let w = p.dual_measure(&fonts.small, label);
         p.dual_text(
             &fonts.small,
             label,
             rect.x + (rect.w - w) / 2.0,
-            rect.y + (rect.h - m.row_h()) / 2.0,
+            rect.y + (rect.h - ROW_H * m.scale) / 2.0,
             w,
-            m.row_h(),
+            ROW_H * m.scale,
             if hovered {
                 theme::WHITE
             } else {
@@ -810,31 +478,7 @@ fn draw_footer(p: &Painter, fonts: &Fonts, m: &Popup, v: &View) {
             theme::ALIGN_NEAR,
         );
     }
-}
-
-fn draw_body(p: &Painter, fonts: &Fonts, m: &Popup, v: &View) -> f32 {
-    // One of three states: the document, a failure notice, or the wait.
-    let notice;
-    let doc = match (v.doc, v.error) {
-        (Some(doc), _) => doc,
-        (None, Some(error)) => {
-            notice = Doc {
-                lines: vec![
-                    Line::Note("读取执行记录失败".into(), theme::RED),
-                    Line::Note(error.to_string(), theme::RED),
-                ],
-            };
-            &notice
-        }
-        (None, None) => {
-            notice = Doc {
-                lines: vec![Line::Note("正在读取执行记录…".into(), theme::TEXT_FAINT)],
-            };
-            &notice
-        }
-    };
-
-    let (visuals, content_h) = layout(p, fonts, m, doc);
+    let table = layout(m, v.doc, |text, width| p.wrap(&fonts.small, text, width));
     let top = m.content_top();
     let view_h = m.content_view_h();
     p.clip(RectF {
@@ -843,33 +487,44 @@ fn draw_body(p: &Painter, fonts: &Fonts, m: &Popup, v: &View) -> f32 {
         Width: m.width,
         Height: view_h,
     });
-    for visual in &visuals {
-        let y = top + visual.y - v.scroll;
-        if y + visual.h < top || y > top + view_h {
+    for (index, band) in table.bands.iter().enumerate() {
+        let y = top + band.y - v.scroll;
+        if y + band.h < top || y > top + view_h {
             continue;
         }
-        let font = match visual.kind {
-            Kind::Section => &fonts.body,
-            _ => &fonts.small,
-        };
+        if index % 2 == 0 {
+            p.fill_rect(band.x, y, band.w, band.h, theme::CARD);
+        }
+        p.fill_rect(
+            band.x,
+            y + band.h - m.scale,
+            band.w,
+            m.scale,
+            theme::SEPARATOR,
+        );
+    }
+    for visual in &table.visuals {
+        let rect = visual.rect;
+        let y = top + rect.y - v.scroll;
+        if y + rect.h < top || y > top + view_h {
+            continue;
+        }
         p.dual_text(
-            font,
+            &fonts.small,
             &visual.text,
-            visual.x,
+            rect.x,
             y,
-            visual.w,
-            visual.h,
+            rect.w,
+            rect.h,
             visual.color,
             theme::ALIGN_NEAR,
         );
     }
     p.reset_clip();
-    draw_scrollbar(p, m, content_h, v.scroll);
-    content_h
+    draw_scrollbar(p, m, table.height, v.scroll);
+    table.height
 }
 
-/// A passive indicator: the popup scrolls with the wheel and the keyboard, so
-/// this only shows how much is left.
 fn draw_scrollbar(p: &Painter, m: &Popup, content_h: f32, scroll: f32) {
     let view_h = m.content_view_h();
     let max_scroll = content_h - view_h;
@@ -891,87 +546,6 @@ fn draw_scrollbar(p: &Painter, m: &Popup, content_h: f32, scroll: f32) {
         theme::TEXT_FAINT,
         true,
     );
-}
-
-/// Lay the document out into drawable strings, `y` measured from the top of the
-/// content area. Wrapping happens here, against the real font metrics, so the
-/// returned height is what the scroll range must be computed from.
-fn layout(p: &Painter, fonts: &Fonts, m: &Popup, doc: &Doc) -> (Vec<Visual>, f32) {
-    let mut out: Vec<Visual> = Vec::new();
-    let row_h = m.row_h();
-    let value_x = m.value_x();
-    let value_w = m.value_w();
-    let mut y = 0.0f32;
-    let mut started = false;
-
-    for line in &doc.lines {
-        match line {
-            Line::Section(text, color) => {
-                y += if started { m.gap() } else { m.gap() / 2.0 };
-                out.push(Visual {
-                    kind: Kind::Section,
-                    x: m.pad(),
-                    y,
-                    w: (m.width - m.pad() * 2.0).max(0.0),
-                    h: m.section_h(),
-                    text: text.clone(),
-                    color: *color,
-                });
-                y += m.section_h() + m.gap() / 2.0;
-                started = true;
-            }
-            Line::Field {
-                label,
-                value,
-                color,
-            } => {
-                for (index, text) in p.wrap(&fonts.small, value, value_w).into_iter().enumerate() {
-                    if index == 0 {
-                        out.push(Visual {
-                            kind: Kind::Label,
-                            x: m.pad(),
-                            y,
-                            w: m.label_w(),
-                            h: row_h,
-                            text: format!("{label}:"),
-                            color: theme::TEXT_FAINT,
-                        });
-                    }
-                    out.push(Visual {
-                        kind: Kind::Value,
-                        x: value_x,
-                        y,
-                        w: value_w,
-                        h: row_h,
-                        text,
-                        color: *color,
-                    });
-                    y += row_h;
-                }
-                started = true;
-            }
-            Line::Note(text, color) => {
-                for wrapped in p.wrap(&fonts.small, text, m.width - m.pad() * 2.0) {
-                    out.push(Visual {
-                        kind: Kind::Note,
-                        x: m.pad(),
-                        y,
-                        w: (m.width - m.pad() * 2.0).max(0.0),
-                        h: row_h,
-                        text: wrapped,
-                        color: *color,
-                    });
-                    y += row_h;
-                }
-                started = true;
-            }
-            Line::Gap => {
-                y += m.gap();
-                started = true;
-            }
-        }
-    }
-    (out, y + m.pad())
 }
 
 #[cfg(test)]

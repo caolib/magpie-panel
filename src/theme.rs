@@ -12,7 +12,7 @@ pub use windows::Win32::Graphics::GdiPlus::{
 };
 use windows::core::PCWSTR;
 
-// --- palette (dark theme, aligned with the AxonHub console) ---
+// --- palette (dark theme) ---
 pub const BG: u32 = 0xFF12_141A;
 pub const CARD: u32 = 0xFF19_1C22;
 pub const CARD_HOVER: u32 = 0xFF22_272F;
@@ -38,7 +38,6 @@ pub const GREEN: u32 = 0xFF3F_B950;
 pub const BLUE: u32 = 0xFF4C_9AFF;
 pub const CYAN: u32 = 0xFF79_C0FF;
 pub const RED: u32 = 0xFFF8_5149;
-pub const GRAY: u32 = 0xFF8B_949E;
 pub const YELLOW: u32 = 0xFFD2_9922;
 /// Bright, unambiguous highlight for the 流 / 转 / 透 marks.
 pub const WHITE: u32 = 0xFF_FF_FF_FF;
@@ -50,8 +49,6 @@ pub fn status_color(status: crate::model::Status) -> u32 {
         Status::Completed => GREEN,
         Status::Failed => RED,
         Status::Processing => BLUE,
-        Status::Pending => YELLOW,
-        Status::Canceled => GRAY,
     }
 }
 
@@ -286,6 +283,7 @@ impl Painter {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn round_rect(&self, x: f32, y: f32, w: f32, h: f32, radius: f32, color: u32, fill: bool) {
         if w <= 0.0 || h <= 0.0 {
             return;
@@ -386,8 +384,8 @@ impl Painter {
             // rectangle height keeps all runs on one baseline. The cell runs to
             // the end of the box rather than stopping at the measured width:
             // `MeasureString` ignores trailing spaces, so a run ending in one
-            // ("AxonHub ") would otherwise be squeezed into a too-narrow
-            // rectangle and trimmed to "AxonHu…" despite fitting easily.
+            // ("Magpie ") would otherwise be squeezed into a too-narrow
+            // rectangle and trimmed despite fitting easily.
             let avail = (x + w - cursor).max(1.0);
             self.text(face, text, cursor, y, avail, h, color, ALIGN_NEAR);
             cursor += run_w;
@@ -414,6 +412,7 @@ impl Painter {
         wrap_by(text, max_w, |s| self.dual_measure(font, s))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn text(
         &self,
         font: *mut GpFont,

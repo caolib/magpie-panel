@@ -1,8 +1,8 @@
 [package]
-name = "ah-panel"
-version = "0.2.0"
+name = "magpie-panel"
+version = "0.3.0"
 edition = "2024"
-description = "Floating desktop panel showing live AxonHub requests"
+description = "Floating desktop panel showing live Magpie gateway requests"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

@@ -12,7 +12,6 @@ mod popup;
 mod settings_window;
 mod theme;
 mod time;
-mod token;
 mod ui;
 mod worker;
 
@@ -41,46 +40,27 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_BACK, VK_ESCAPE, VK_RETURN, VK_TAB,
 };
-use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GetWindowLongPtrW, SetWindowLongPtrW, *,
 };
-use windows::core::PCWSTR;
+use windows::core::{PCWSTR, w};
 
 use app::{App, LoginTarget, View};
 use config::{
-    Account, Config, CredentialMode, Credentials, FONT_SIZE_MAX, FONT_SIZE_MIN, OPACITY_MAX,
-    OPACITY_MIN, Stored, WindowState,
+    Account, Config, FONT_SIZE_MAX, FONT_SIZE_MIN, OPACITY_MAX, OPACITY_MIN, WindowState,
 };
 use theme::{Fonts, Painter};
 use time::now_unix;
 use ui::detail::{self, Button};
-use ui::layout::{LayoutMode, Metrics};
-use ui::login::{self, Action as LoginAction, Field, Method};
+use ui::layout::Metrics;
+use ui::login::{self, Action as LoginAction};
 use ui::panel::{self, ListView};
-use worker::{Command, Target, Update, Worker};
+use worker::{Command, Worker};
 
-const CLASS_NAME: &str = "AHPanelWindow";
+const CLASS_NAME: &str = "MagpiePanelWindow";
 /// The error-detail popup's class. A second window rather than an overlay: the
 /// document is larger than the panel and outlives any single frame of it.
-const DETAIL_CLASS: &str = "AHDetailWindow";
-/// UTF-16 form of `CLASS_NAME`, keeping the literal alive for the window class.
-const CLASS_WIDE: [u16; 14] = [
-    b'A' as u16,
-    b'H' as u16,
-    b'P' as u16,
-    b'a' as u16,
-    b'n' as u16,
-    b'e' as u16,
-    b'l' as u16,
-    b'W' as u16,
-    b'i' as u16,
-    b'n' as u16,
-    b'd' as u16,
-    b'o' as u16,
-    b'w' as u16,
-    0,
-];
+const DETAIL_CLASS: &str = "MagpieDetailWindow";
 /// Sent by the tracking requested in `WM_MOUSEMOVE`. Not exported by the
 /// windows crate, so it is spelled out here.
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -89,8 +69,8 @@ const TIMER_CARET: usize = 2;
 /// Repaints so relative timestamps ("3 分钟前") stay honest while idle.
 const TIMER_CLOCK: usize = 3;
 
-/// Whether the cursor is over the header id field, in client coordinates.
-fn over_id_box(hwnd: HWND) -> bool {
+/// Whether the cursor is over the header query box, in client coordinates.
+fn over_query_box(hwnd: HWND) -> bool {
     if State::with(|s| s.app.is_login()).unwrap_or(true) {
         return false;
     }
@@ -99,7 +79,7 @@ fn over_id_box(hwnd: HWND) -> bool {
         let _ = GetCursorPos(&mut cursor);
         let _ = ScreenToClient(hwnd, &mut cursor);
     }
-    panel::id_box_rect(metrics_for(hwnd)).contains(cursor.x as f32, cursor.y as f32)
+    panel::query_box_rect(metrics_for(hwnd)).contains(cursor.x as f32, cursor.y as f32)
 }
 
 /// Whether Ctrl (or Shift for Ctrl+Shift+V) is held.
@@ -161,8 +141,7 @@ fn sync_scale(hwnd: HWND) {
     // Whole rows only: derive the height from the row count so no partial
     // card is left over, and keep the panel inside this monitor's work area.
     let work = work_area_for(hwnd);
-    let mode = layout_mode();
-    let fitted = ui::layout::height_for_rows(config_rows(hwnd), scale, mode).min(work.3 - work.1);
+    let fitted = ui::layout::height_for_rows(config_rows(hwnd), scale).min(work.3 - work.1);
     if fitted > 0 {
         height = fitted;
     }
@@ -175,7 +154,6 @@ fn sync_scale(hwnd: HWND) {
         },
         work,
         scale,
-        mode,
     );
     unsafe {
         let _ = SetWindowPos(
@@ -198,13 +176,6 @@ fn config_rows(hwnd: HWND) -> usize {
     State::with(|s| s.app.config.row_limit.max(1) as usize).unwrap_or(12)
 }
 
-/// Which layout the list area draws. Read on its own rather than inside another
-/// `State::with`: `window_scale` already borrows the state, and nesting the
-/// borrow would panic.
-fn layout_mode() -> LayoutMode {
-    State::with(|s| s.app.config.layout_mode()).unwrap_or(LayoutMode::Cards)
-}
-
 /// Rows that fit in the window at its current size.
 fn current_visible_rows(hwnd: HWND) -> usize {
     let mut rc = RECT::default();
@@ -212,13 +183,12 @@ fn current_visible_rows(hwnd: HWND) -> usize {
         let _ = GetClientRect(hwnd, &mut rc);
     }
     let height = (rc.bottom - rc.top) as f32;
-    ui::layout::rows_in_height(height, window_scale(hwnd), layout_mode())
+    ui::layout::rows_in_height(height, window_scale(hwnd))
 }
 
 /// Context-menu command ids.
 const MENU_REFRESH: usize = 1001;
 const MENU_SETTINGS: usize = 1002;
-const MENU_OPEN: usize = 1101;
 const MENU_TOPMOST: usize = 1200;
 const MENU_PIN_POSITION: usize = 1202;
 const MENU_BOTTOMMOST: usize = 1203;
@@ -227,40 +197,24 @@ const MENU_ROWS_10: usize = 1401;
 const MENU_ROWS_15: usize = 1402;
 const MENU_ROWS_20: usize = 1403;
 const MENU_QUIT: usize = 1300;
-/// Display-mode submenu: the three layouts, exactly one checked at a time.
-const MENU_MODE_CARDS: usize = 1204;
-const MENU_MODE_SINGLE_LINE: usize = 1205;
-const MENU_MODE_TABLE: usize = 1206;
 /// Font-size submenu items: `MENU_FONT_BASE` = 10 px, `MENU_FONT_BASE + 14` =
 /// 24 px. The menu lists common integer steps; the settings field accepts
 /// anything in `config::FONT_SIZE_MIN..=FONT_SIZE_MAX`.
 const MENU_FONT_BASE: usize = 1500;
 const MENU_FONT_MAX: usize = MENU_FONT_BASE + 14;
-/// Accounts listed under the "打开请求页" submenu: index into `config.accounts`.
-const MENU_OPEN_ACCOUNT_BASE: usize = 1600;
-const MENU_OPEN_ACCOUNT_MAX: usize = MENU_OPEN_ACCOUNT_BASE + 99;
 
 thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
 }
 
-/// The error-detail popup, while it is open. There is at most one: opening a
+/// The request-detail popup, while it is open. There is at most one: opening a
 /// second request's detail replaces the content instead of stacking windows.
 struct DetailPopup {
     hwnd: HWND,
-    /// The card the popup was opened from. The fetched executions belong to it.
-    row: model::Row,
-    /// Deep link to the request's page in the console.
-    url: String,
-    /// The upstream attempts, once fetched. Kept so switching between the
-    /// compact and the full document does not need another round trip.
-    executions: Option<Vec<model::ExecutionDetail>>,
-    /// Rendered from `executions` for the current `depth`.
-    doc: Option<detail::Doc>,
-    /// Why the fetch failed; replaces the document when set.
-    error: Option<String>,
-    /// Whether the document is the compact or the full one.
-    depth: detail::Depth,
+    /// Raw row, matched attempts and the request nonce remain stable across paints.
+    session: model::DetailSession,
+    /// Four-column log table, rebuilt from raw fields and matched attempts.
+    doc: detail::Doc,
     scroll: f32,
     /// Content height as measured by the last paint, so a wheel event between
     /// two frames can clamp the offset without laying the document out again.
@@ -273,6 +227,8 @@ struct State {
     worker: Worker,
     fonts: Fonts,
     detail: Option<DetailPopup>,
+    detail_nonce: u64,
+    targets_revision: u64,
     settings: Option<settings_window::Popup>,
     settings_login: Option<settings_window::LoginReturn>,
     /// Whether the window currently lacks `WS_EX_NOACTIVATE`, i.e. can take
@@ -342,13 +298,9 @@ fn edge_at(m: Metrics, x: f32, y: f32) -> Option<Edge> {
     if x < 0.0 || y < 0.0 || x > w || y > h {
         return None;
     }
-    let (left, right) = if m.mode == LayoutMode::Table {
-        // The table's width follows its columns, so a horizontal drag would be
-        // undone by the next fit; the side margins drag the window instead.
-        (false, false)
-    } else {
-        (x <= RESIZE_BORDER, x >= w - RESIZE_BORDER)
-    };
+    // The table's width follows its columns, so a horizontal drag would be
+    // undone by the next fit; only the top and bottom edges resize.
+    let (left, right) = (false, false);
     let top = y <= RESIZE_BORDER;
     let bottom = y >= h - RESIZE_BORDER;
     Some(match (left, right, top, bottom) {
@@ -373,10 +325,8 @@ fn edge_at(m: Metrics, x: f32, y: f32) -> Option<Edge> {
 fn hit_test(m: Metrics, x: f32, y: f32) -> isize {
     let pinned = State::with(|s| s.app.config.pin_position).unwrap_or(false);
 
-    if !pinned {
-        if let Some(edge) = edge_at(m, x, y) {
-            return edge.hit_test() as isize;
-        }
+    if !pinned && let Some(edge) = edge_at(m, x, y) {
+        return edge.hit_test() as isize;
     }
 
     let clickable = State::with(|s| {
@@ -386,14 +336,14 @@ fn hit_test(m: Metrics, x: f32, y: f32) -> isize {
                 .as_ref()
                 .is_some_and(|form| login::hit(form, m, x, y).is_some())
         } else {
-            // A card is otherwise a drag handle, so a stray click can never
-            // open anything; a card with something to explain — a request that
-            // failed, or one that only succeeded after a failed attempt — is the
+            // A row is otherwise a drag handle, so a stray click can never open
+            // anything; a row with something to explain — a request that failed,
+            // or one that only succeeded after a failed attempt — is the
             // exception, since there the reason is one click away. The header
-            // filter chips and the id field are clickable too.
+            // filter chips and the query box are clickable too.
             let view = list_view(s);
             panel::settings_button(m).contains(x, y)
-                || panel::id_box_rect(m).contains(x, y)
+                || panel::query_box_rect(m).contains(x, y)
                 || panel::hit_filter(m, &view, x, y).is_some()
                 || panel::hit_error_row(m, &view, x, y).is_some()
         }
@@ -417,7 +367,6 @@ fn metrics_for(hwnd: HWND) -> Metrics {
         (rc.bottom - rc.top) as f32,
         window_scale(hwnd),
     )
-    .with_mode(layout_mode())
 }
 
 /// Windows' per-monitor DPI setting as a scale over the 96-DPI baseline GDI+
@@ -535,13 +484,11 @@ fn main() {
             .encode_utf16()
             .chain(std::iter::once(0))
             .collect();
-        if let Ok(h) = GetModuleHandleW(PCWSTR(uxtheme.as_ptr())) {
-            if let Some(proc) =
-                GetProcAddress(h, windows::core::PCSTR(b"SetPreferredAppMode\0".as_ptr()))
-            {
-                let func: unsafe extern "system" fn(u32) -> i32 = std::mem::transmute(proc);
-                func(3); // AllowDark
-            }
+        if let Ok(h) = GetModuleHandleW(PCWSTR(uxtheme.as_ptr()))
+            && let Some(proc) = GetProcAddress(h, windows::core::s!("SetPreferredAppMode"))
+        {
+            let func: unsafe extern "system" fn(u32) -> i32 = std::mem::transmute(proc);
+            func(3); // AllowDark
         }
 
         let mut token = 0usize;
@@ -557,65 +504,22 @@ fn main() {
         }
 
         let mut config = Config::load();
-        let mut stored = config::load_stored().unwrap_or_default();
+        let stored = config::load_stored().unwrap_or_default();
 
-        // An install from before multiple accounts carries one token in the
-        // blob; fold it into the account list so it keeps working.
-        if config::migrate_single_account(&mut config, &mut stored) {
+        // A fresh install polls the gateway that ships with Magpie: it needs no
+        // key and needs no setup, so the panel has something to show
+        // immediately.
+        if config.accounts.is_empty() {
+            let id = config.fresh_account_id();
+            config.upsert_account(Account {
+                id,
+                name: config::endpoint_host(&config.endpoint),
+                endpoint: config.endpoint.clone(),
+            });
             config.save();
-            config.store(&stored);
-        }
-
-        // The environment variable is a single token, so it stands in for the
-        // first account: exporting a fresh token is how a headless setup
-        // refreshes one of them. With no accounts at all it also names the
-        // account, from the endpoint it points at.
-        let env_token = config::token_from_env(&config.token_env_var);
-        if let Some(token) = &env_token {
-            match config.accounts.first_mut() {
-                Some(first) => {
-                    let id = first.id.clone();
-                    stored.set_token(&id, token);
-                }
-                None => {
-                    let id = "a1".to_string();
-                    config.upsert_account(Account {
-                        id: id.clone(),
-                        name: config::endpoint_host(&config.endpoint),
-                        endpoint: config.endpoint.clone(),
-                        project_id: config.project_id.clone(),
-                    });
-                    stored.set_token(&id, token);
-                    config.save();
-                }
-            }
-            config.store(&stored);
         }
 
         let targets = worker::targets_from(&config, &stored);
-
-        // An expired token is a routine event (AxonHub issues 7-day tokens with
-        // no refresh), so say so rather than letting the first poll 401. With a
-        // saved password the worker renews silently, so only token-only accounts
-        // need the notice.
-        let expired_notice = config
-            .accounts
-            .iter()
-            .filter(|_| config.credential_mode != CredentialMode::Password)
-            .find(|a| {
-                stored
-                    .token_for(&a.id)
-                    .is_some_and(|t| token::is_expired(&t, now_unix()))
-            })
-            .and_then(|a| {
-                stored.token_for(&a.id).map(|t| {
-                    format!(
-                        "账号 {} 的访问令牌已过期({}),请重新获取",
-                        a.name,
-                        token::describe(&t, now_unix())
-                    )
-                })
-            });
 
         let worker = Worker::spawn(config.clone(), targets.clone());
 
@@ -626,7 +530,7 @@ fn main() {
         let wc = WNDCLASSW {
             lpfnWndProc: Some(wnd_proc),
             hInstance: instance.into(),
-            lpszClassName: PCWSTR(CLASS_WIDE.as_ptr()),
+            lpszClassName: w!("MagpiePanelWindow"),
             hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
             ..Default::default()
         };
@@ -648,25 +552,17 @@ fn main() {
 
         let mut app = App::new(config.clone());
         app.stored = stored.clone();
-        if !targets.iter().any(Target::can_authenticate) {
-            // No account can be polled: collect a token. An existing account is
-            // re-signed-in from its own form; a fresh install starts on a new
-            // one.
-            let target = match config.accounts.first() {
-                Some(account) => LoginTarget::Account(account.id.clone()),
-                None => LoginTarget::Add,
-            };
-            app.open_login(expired_notice.clone(), target);
-        }
 
-        // The sign-in form needs the keyboard; the request list deliberately
-        // does not, so that reading it never steals focus from other windows.
+        // The list deliberately does not take the keyboard, so reading it never
+        // steals focus from other windows.
         let wants_focus = app.is_login();
         let state = State {
             app,
             worker,
             fonts: Fonts::load(1.0, &config.font_family, &config.cjk_font_family),
             detail: None,
+            detail_nonce: 0,
+            targets_revision: 0,
             settings: None,
             settings_login: None,
             activatable: wants_focus,
@@ -711,7 +607,7 @@ fn main() {
             .encode_utf16()
             .chain(std::iter::once(0))
             .collect::<Vec<u16>>();
-        let title = "AxonHub 请求面板"
+        let title = "magpie-panel"
             .encode_utf16()
             .chain(std::iter::once(0))
             .collect::<Vec<u16>>();
@@ -772,14 +668,13 @@ fn main() {
             ui::layout::logical_px(saved.width.max(1), scale)
         };
         let work = work_area_for(hwnd);
-        let mode = config.layout_mode();
         let width = ui::layout::device_px(logical_width, scale);
-        // The password form is taller than a short list window; size the
+        // The connection form is taller than a short list window; size the
         // window to the form on first launch so every field is visible.
         let height = if wants_focus {
             ui::login::window_height(scale)
         } else {
-            ui::layout::height_for_rows(config.row_limit.max(1) as usize, scale, mode)
+            ui::layout::height_for_rows(config.row_limit.max(1) as usize, scale)
         }
         .min(work.3 - work.1);
         let (x, y) = if saved.x < 0 && saved.y < 0 {
@@ -798,7 +693,6 @@ fn main() {
             },
             work,
             scale,
-            mode,
         );
         let _ = SetWindowPos(
             hwnd,
@@ -923,7 +817,6 @@ fn clamp_window_rect(rect: RECT, work: (i32, i32, i32, i32), hwnd: HWND) -> Wind
         },
         work,
         window_scale(hwnd),
-        layout_mode(),
     )
 }
 
@@ -1001,52 +894,6 @@ fn fit_window_to_work_area(hwnd: HWND) {
     }
 }
 
-/// Refit the panel after a layout switch: height for the configured row count
-/// in the current mode, clamped to the work area. `restore_card_width` puts
-/// the width back to the one the config kept for card mode — the table's width
-/// is driven by its columns instead, and is fitted on the next paint.
-fn refit_layout(hwnd: HWND, restore_card_width: bool) {
-    let mode = layout_mode();
-    let scale = window_scale(hwnd);
-    let work = work_area_for(hwnd);
-    let height = ui::layout::height_for_rows(config_rows(hwnd), scale, mode).min(work.3 - work.1);
-    let mut rc = RECT::default();
-    unsafe {
-        let _ = GetWindowRect(hwnd, &mut rc);
-    }
-    let width = if restore_card_width {
-        let logical = State::with(|s| s.app.config.window.width).unwrap_or(452);
-        ui::layout::device_px(logical, scale)
-    } else {
-        rc.right - rc.left
-    };
-    let placed = config::clamp_to_virtual_screen(
-        WindowState {
-            x: rc.left,
-            y: rc.top,
-            width,
-            height,
-        },
-        work,
-        scale,
-        mode,
-    );
-    unsafe {
-        let _ = SetWindowPos(
-            hwnd,
-            None,
-            placed.x,
-            placed.y,
-            placed.width,
-            placed.height,
-            SWP_NOZORDER | SWP_NOACTIVATE,
-        );
-    }
-    clamp_scroll(hwnd);
-    save_window_state(hwnd);
-    invalidate(hwnd);
-}
-
 fn apply_window_chrome(hwnd: HWND) {
     use windows::Win32::Graphics::Dwm::{DWMWA_WINDOW_CORNER_PREFERENCE, DwmSetWindowAttribute};
     unsafe {
@@ -1112,8 +959,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 (rc.right - rc.left) as f32,
                 (rc.bottom - rc.top) as f32,
                 window_scale(hwnd),
-            )
-            .with_mode(layout_mode());
+            );
 
             return LRESULT(hit_test(m, x, y));
         }
@@ -1128,19 +974,18 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 (rc.right - rc.left) as f32,
                 (rc.bottom - rc.top) as f32,
                 window_scale(hwnd),
-            )
-            .with_mode(layout_mode());
+            );
             let local_x = (cursor.x - rc.left) as f32;
             let local_y = (cursor.y - rc.top) as f32;
-            // The sign-in form's text rows are the one place where the pointer
-            // means "put the caret here", so they get the I-beam.
+            // The connection form's text rows are the one place where the
+            // pointer means "put the caret here", so they get the I-beam.
             let over_text = State::with(|s| {
                 (s.app.is_login()
                     && s.app
                         .login
                         .as_ref()
                         .is_some_and(|f| login::hit_text_field(f, m, local_x, local_y)))
-                    || (!s.app.is_login() && panel::id_box_rect(m).contains(local_x, local_y))
+                    || (!s.app.is_login() && panel::query_box_rect(m).contains(local_x, local_y))
             })
             .unwrap_or(false);
             let pinned = State::with(|s| s.app.config.pin_position).unwrap_or(false);
@@ -1165,10 +1010,9 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             }
         }
         WM_GETMINMAXINFO => {
-            // Keep the panel usable: wide enough for the metric row, tall enough
-            // for the header and a couple of rows. The floor follows the layout
-            // (single-line and table rows are much shorter than cards).
-            let (min_w, min_h) = config::min_window_size(window_scale(hwnd), layout_mode());
+            // Keep the panel usable: wide enough for the header's controls, tall
+            // enough for the header and a couple of rows.
+            let (min_w, min_h) = config::min_window_size(window_scale(hwnd));
             let info = unsafe { &mut *(lp.0 as *mut MINMAXINFO) };
             info.ptMinTrackSize = POINT { x: min_w, y: min_h };
             return LRESULT(0);
@@ -1313,8 +1157,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             // Whole rows only: derive the height from the row count instead of
             // trusting the scaled pixel value, so no partial row is left over.
             let work = work_area_at(x, y);
-            let fitted = ui::layout::height_for_rows(config_rows(hwnd), scale, layout_mode())
-                .min(work.3 - work.1);
+            let fitted = ui::layout::height_for_rows(config_rows(hwnd), scale).min(work.3 - work.1);
             if fitted > 0 {
                 height = fitted;
             }
@@ -1346,13 +1189,13 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         }
         WM_COMMAND => on_command(wp, &mut actions),
         WM_MOUSEACTIVATE => {
-            // The id field is drawn by the panel, and a layered window with
+            // The query box is drawn by the panel, and a layered window with
             // WS_EX_NOACTIVATE never receives the keys for it. Drop the style
             // before this click is delivered so the panel can take them.
-            if over_id_box(hwnd) {
+            if over_query_box(hwnd) {
                 State::with(|s| {
-                    s.app.id_editing = true;
-                    s.app.id_caret = true;
+                    s.app.query_editing = true;
+                    s.app.query_caret = true;
                     s.activatable = true;
                 });
                 apply_activation(hwnd, true);
@@ -1366,13 +1209,13 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             return unsafe { DefWindowProcW(hwnd, msg, wp, lp) };
         }
         WM_ACTIVATE if wp.0 as u32 & 0xFFFF == WA_INACTIVE => {
-            // Focus left the panel. Stop accepting keys, unless the sign-in
+            // Focus left the panel. Stop accepting keys, unless the connection
             // form is up — that one stays ready for the next keystroke.
             let keep = State::with(|s| {
                 if s.app.is_login() {
                     return true;
                 }
-                s.app.id_editing = false;
+                s.app.query_editing = false;
                 s.activatable = false;
                 false
             })
@@ -1421,12 +1264,11 @@ enum Action {
     ShowMenu,
     ShowSettings(POINT),
     ReturnToSettings,
-    /// Sign in with the credentials currently in the form.
-    SignIn,
-    /// Resize the panel so the sign-in form fits (it is taller than a short
+    /// Save the connection the form describes.
+    SaveConnection,
+    /// Resize the panel so the connection form fits (it is taller than a short
     /// list window), or back to the saved list geometry.
     FitLogin(bool),
-    OpenUrl(String),
     /// Apply an always-on-top change to the live window.
     SetTopmost(bool),
     /// Pin the window to the bottom of the Z order; mutually exclusive with topmost.
@@ -1444,28 +1286,23 @@ enum Action {
     /// Change the panel opacity from the settings field; applied as a layered
     /// window alpha so the whole panel becomes translucent.
     SetOpacity(u8),
-    /// Switch the list to one of the three layouts. The row count is kept and
-    /// the window refitted; entering the table lets the next paint fit the
-    /// width to its columns, leaving it restores the card width.
-    SetDisplayMode(LayoutMode),
     /// Resize the window to the client width the table's columns asked for.
     FitTableWidth(i32),
     /// Toggle `WS_EX_NOACTIVATE` so the window can (or cannot) take focus.
     SetActivatable(bool),
     /// Open the error-detail popup for a row of the list.
     ShowDetail(usize, POINT),
-    /// Switch the open detail document between compact and full.
-    ToggleDetail,
     /// Refresh a cached detail document after its visibility switches change.
     RedrawDetail,
     /// Close the window whose own proc raised this action.
     CloseWindow,
     /// Copy the open detail document to the clipboard.
     CopyDetail,
-    ClearCredentials,
-    /// Paste the clipboard into the focused sign-in field.
+    /// Forget every saved gateway key; the connections stay listed.
+    ClearKeys,
+    /// Paste the clipboard into the focused connection-form field.
     Paste,
-    /// Clear the focused sign-in field.
+    /// Clear the focused connection-form field.
     ClearField,
     /// Put the form's selection on the clipboard.
     CopySelection,
@@ -1483,12 +1320,7 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
             Action::RedrawDetail => {
                 let popup = State::with(|s| {
                     let open = s.detail.as_mut()?;
-                    rebuild_doc(
-                        open,
-                        &s.app.config.model_aliases,
-                        &s.app.config.hidden_fields,
-                        &s.app.config.channel_key_aliases,
-                    );
+                    rebuild_doc(open, &s.app.config);
                     Some(open.hwnd)
                 })
                 .flatten();
@@ -1509,7 +1341,7 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
                 }
             }
             Action::ReturnToSettings => settings_window::finish_login(hwnd, true),
-            Action::SignIn => submit_login(hwnd),
+            Action::SaveConnection => save_connection(hwnd),
             Action::FitLogin(true) => {
                 if State::with(|s| s.settings_login.is_none()).unwrap_or(false) {
                     fit_login_window(hwnd);
@@ -1520,7 +1352,6 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
                     restore_list_window(hwnd);
                 }
             }
-            Action::OpenUrl(url) => open_url_async(&url),
             Action::SetTopmost(on) => {
                 let insert_after = if on { HWND_TOPMOST } else { HWND_NOTOPMOST };
                 unsafe {
@@ -1578,8 +1409,7 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
                 });
                 let scale = window_scale(hwnd);
                 let work = work_area_for(hwnd);
-                let height =
-                    ui::layout::height_for_rows(rows, scale, layout_mode()).min(work.3 - work.1);
+                let height = ui::layout::height_for_rows(rows, scale).min(work.3 - work.1);
                 let mut rc = RECT::default();
                 unsafe {
                     let _ = GetWindowRect(hwnd, &mut rc);
@@ -1639,20 +1469,6 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
                 });
                 apply_opacity(hwnd, opacity);
             }
-            Action::SetDisplayMode(mode) => {
-                let previous = State::with(|s| {
-                    let previous = s.app.config.layout_mode();
-                    s.app.config.single_line = mode == LayoutMode::SingleLine;
-                    s.app.config.table_mode = mode == LayoutMode::Table;
-                    previous
-                })
-                .unwrap_or(mode);
-                if previous != mode {
-                    // Leaving the table hands the width back to the cards;
-                    // entering it lets the next paint fit the columns.
-                    refit_layout(hwnd, previous == LayoutMode::Table);
-                }
-            }
             Action::FitTableWidth(width) => {
                 // The table asked for a width the window does not have yet.
                 // Clamping may pull the window back in (a table wider than the
@@ -1677,7 +1493,6 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
                     },
                     work,
                     scale,
-                    layout_mode(),
                 );
                 if placed.width == rc.right - rc.left && placed.x == rc.left {
                     continue;
@@ -1740,11 +1555,9 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
             }
             Action::RemoveAccount(id) => {
                 State::with(|s| {
+                    // `remove_account` also drops the connection's provider
+                    // filters; the key blob is the only other place it lives.
                     s.app.config.remove_account(&id);
-                    s.app
-                        .config
-                        .hidden_channels
-                        .retain(|entry| entry.account_id != id);
                     s.app.issues.retain(|issue| issue.id != id);
                     s.app.open_accounts.retain(|account| account != &id);
                     s.app.accounts = s.app.config.accounts.clone();
@@ -1753,64 +1566,36 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
                     s.app.stored = stored;
                     s.app.config.store(&s.app.stored.clone());
                     s.app.save();
+                    s.app.rebuild();
                     send_targets(s);
-                    // Deleting the last account leaves nothing to poll, so the
-                    // form comes back up for a new one.
+                    // Deleting the last connection leaves nothing to poll, so
+                    // the form comes back up for a new one.
                     if s.app.accounts.is_empty() {
                         s.app
-                            .open_login(Some("已删除账号,请添加一个".into()), LoginTarget::Add);
+                            .open_login(Some("已删除连接,请添加一个".into()), LoginTarget::Add);
                     } else {
-                        s.app.status = Some(("已删除账号".into(), false));
+                        s.app.status = Some(("已删除连接".into(), false));
                     }
                 });
                 sync_activation(&mut actions);
                 invalidate(hwnd);
             }
             Action::ShowDetail(index, point) => open_detail(hwnd, index, point),
-            Action::ToggleDetail => {
-                let popup = State::with(|s| {
-                    let open = s.detail.as_mut()?;
-                    open.depth = match open.depth {
-                        detail::Depth::Compact => detail::Depth::Full,
-                        detail::Depth::Full => detail::Depth::Compact,
-                    };
-                    rebuild_doc(
-                        open,
-                        &s.app.config.model_aliases,
-                        &s.app.config.hidden_fields,
-                        &s.app.config.channel_key_aliases,
-                    );
-                    // The two documents have nothing in common position-wise.
-                    open.scroll = 0.0;
-                    Some((open.hwnd, open.depth))
-                })
-                .flatten();
-                if let Some((hwnd, depth)) = popup {
-                    fit_detail_height(hwnd, window_scale(hwnd), depth);
-                    invalidate(hwnd);
-                }
-            }
             Action::CloseWindow => unsafe {
                 let _ = DestroyWindow(hwnd);
             },
             Action::CopyDetail => copy_detail_text(),
-            Action::ClearCredentials => {
+            Action::ClearKeys => {
                 config::clear_stored();
-                // The accounts keep their names and endpoints — only the
-                // secrets go — so the menu still lists them and each can be
-                // signed in again with a fresh token.
+                // The connections keep their names and endpoints — only the
+                // gateway keys go — so a remote gateway simply starts failing
+                // its polls until a key is supplied again.
                 State::with(|s| {
-                    s.app.stored = Stored::default();
+                    s.app.stored = config::Stored::default();
                     s.app.probe = None;
+                    s.app.status = Some(("已清除保存的网关密钥".into(), false));
                     send_targets(s);
-                    let target = match s.app.accounts.first() {
-                        Some(account) => LoginTarget::Account(account.id.clone()),
-                        None => LoginTarget::Add,
-                    };
-                    s.app
-                        .open_login(Some("已清除本机保存的凭据".into()), target);
                 });
-                sync_activation(&mut actions);
                 invalidate(hwnd);
             }
         }
@@ -1848,18 +1633,10 @@ fn save_window_state(hwnd: HWND) {
             };
         }
         s.app.config.logical_window = true;
-        // The table's width follows its columns, so the live width is not the
-        // user's choice while it is on: keep the card-mode width instead, and
-        // leaving the table restores it.
-        let width = if s.app.config.table_mode {
-            s.app.config.window.width
-        } else {
-            ui::layout::logical_px((rc.right - rc.left).max(320), scale)
-        };
         s.app.config.window = WindowState {
             x: rc.left,
             y: rc.top,
-            width,
+            width: ui::layout::logical_px((rc.right - rc.left).max(320), scale),
             height: ui::layout::logical_px((rc.bottom - rc.top).max(240), scale),
         };
         s.app.save();
@@ -1888,7 +1665,6 @@ fn fit_login_window(hwnd: HWND) {
         },
         work,
         scale,
-        layout_mode(),
     );
     unsafe {
         let _ = SetWindowPos(
@@ -1916,8 +1692,7 @@ fn restore_list_window(hwnd: HWND) {
     .unwrap_or((config::DEFAULT_ROWS, 452));
     let scale = window_scale(hwnd);
     let work = work_area_for(hwnd);
-    let mode = layout_mode();
-    let height = ui::layout::height_for_rows(rows, scale, mode).min(work.3 - work.1);
+    let height = ui::layout::height_for_rows(rows, scale).min(work.3 - work.1);
     let width = ui::layout::device_px(logical_width, scale);
     let mut rc = RECT::default();
     unsafe {
@@ -1932,7 +1707,6 @@ fn restore_list_window(hwnd: HWND) {
         },
         work,
         scale,
-        mode,
     );
     unsafe {
         let _ = SetWindowPos(
@@ -1948,27 +1722,20 @@ fn restore_list_window(hwnd: HWND) {
     invalidate(hwnd);
 }
 
-/// One character typed into the header box. Long enough for a full request
-/// GUID; control characters never reach here.
-fn type_id_char(app: &mut App, ch: char) -> bool {
-    if ch.is_control() || app.id_draft.chars().count() >= 64 {
+/// One character typed into the header query box.
+fn type_query_char(app: &mut App, ch: char) -> bool {
+    if ch.is_control() || app.query_draft.chars().count() >= 64 {
         return false;
     }
-    app.id_draft.push(ch);
-    app.id_caret = true;
+    app.query_draft.push(ch);
+    app.query_caret = true;
     true
 }
 
-/// Enter in the header box sends the text as the console's `modelID` filter.
-/// An empty box clears it.
-fn submit_id_query(hwnd: HWND) {
-    let query = State::with(|s| s.app.id_draft.trim().to_string()).filter(|q| !q.is_empty());
-    State::with(|s| {
-        s.app.id_query = query.clone();
-        s.app.scroll = 0.0;
-        s.app.status = query.as_ref().map(|_| ("查询中…".into(), false));
-        s.worker.send(Command::SetModelFilter(query));
-    });
+/// Enter in the header box narrows the list locally; an empty box clears it.
+/// The rows are already in memory, so no round trip is needed.
+fn submit_query(hwnd: HWND) {
+    State::with(|s| s.app.apply_query());
     invalidate(hwnd);
 }
 
@@ -2021,8 +1788,7 @@ fn paint(hwnd: HWND) -> Option<i32> {
             (rc.right - rc.left) as f32,
             (rc.bottom - rc.top) as f32,
             window_scale(hwnd),
-        )
-        .with_mode(layout_mode());
+        );
 
         // Draw the whole frame into an off-screen bitmap and present it with one
         // BitBlt. Painting the window DC directly lets each invalidate show a
@@ -2047,10 +1813,10 @@ fn paint(hwnd: HWND) -> Option<i32> {
                         pinned: s.app.config.pin_position,
                         filter: s.app.filter,
                         hidden_fields: &s.app.config.hidden_fields,
-                        id_query: s.app.id_query.as_deref(),
-                        id_draft: &s.app.id_draft,
-                        id_editing: s.app.id_editing,
-                        id_caret: s.app.id_caret,
+                        query: s.app.query.as_deref(),
+                        query_draft: &s.app.query_draft,
+                        query_editing: s.app.query_editing,
+                        query_caret: s.app.query_caret,
                     };
                     panel::draw(&painter, &s.fonts, m, &view)
                 }
@@ -2088,8 +1854,8 @@ fn on_timer(hwnd: HWND, id: usize, actions: &mut Vec<Action>) {
         TIMER_CARET => {
             // Blink the caret while a text field holds focus.
             let blink = State::with(|s| {
-                if s.app.id_editing {
-                    s.app.id_caret = !s.app.id_caret;
+                if s.app.query_editing {
+                    s.app.query_caret = !s.app.query_caret;
                     return true;
                 }
                 if !s.app.is_login() {
@@ -2098,9 +1864,6 @@ fn on_timer(hwnd: HWND, id: usize, actions: &mut Vec<Action>) {
                 let Some(form) = s.app.login.as_mut() else {
                     return false;
                 };
-                if form.focus == Field::Remember {
-                    return false;
-                }
                 form.caret_on = !form.caret_on;
                 true
             });
@@ -2123,16 +1886,37 @@ fn pump_worker(actions: &mut Vec<Action>) {
             return false;
         }
         let was_login = s.app.is_login();
-        // Detail answers belong to the popup, not the list; everything else is
-        // list state.
-        let mut rest = Vec::with_capacity(updates.len());
+        let mut app_updates = Vec::new();
         for update in updates {
             match update {
-                Update::Detail { id, result } => apply_detail(s, &id, result),
-                other => rest.push(other),
+                worker::Update::Detail { ticket, detail } => {
+                    let endpoint = s
+                        .app
+                        .config
+                        .account(&ticket.identity.account_id)
+                        .map(|a| a.endpoint.as_str());
+                    if let Some(open) = s.detail.as_mut() {
+                        open.session
+                            .receive(&ticket, detail, s.targets_revision, endpoint);
+                    }
+                }
+                other => app_updates.push(other),
             }
         }
-        s.app.apply_updates(rest);
+        s.app.apply_updates(app_updates);
+        if let Some(open) = s.detail.as_mut() {
+            let endpoint = s
+                .app
+                .config
+                .account(&open.session.ticket.identity.account_id)
+                .map(|a| a.endpoint.as_str());
+            if open.session.ticket.revision == s.targets_revision
+                && endpoint == Some(open.session.ticket.endpoint.as_str())
+            {
+                open.session.refresh(s.app.raw_rows());
+            }
+            rebuild_doc(open, &s.app.config);
+        }
         left_login = was_login && !s.app.is_login();
         popup = s.detail.as_ref().map(|p| p.hwnd);
         true
@@ -2151,85 +1935,17 @@ fn pump_worker(actions: &mut Vec<Action>) {
     }
 }
 
-/// Store one request's executions in the open popup. A reply for a request the
-/// user has already clicked away from is dropped rather than painted over the
-/// newer content.
-fn apply_detail(
-    s: &mut State,
-    id: &str,
-    result: Result<Vec<model::ExecutionDetail>, client::ApiError>,
-) {
-    let Some(open) = s.detail.as_mut() else {
-        return;
-    };
-    if open.row.id != id {
-        return;
-    }
-    match result {
-        Ok(executions) => {
-            open.executions = Some(executions);
-            open.error = None;
-        }
-        Err(err) => {
-            open.executions = None;
-            open.error = Some(err.message());
-        }
-    }
-    rebuild_doc(
-        open,
-        &s.app.config.model_aliases,
-        &s.app.config.hidden_fields,
-        &s.app.config.channel_key_aliases,
-    );
-    open.scroll = 0.0;
+/// Rebuild the log table after new data or name mappings arrive.
+fn rebuild_doc(open: &mut DetailPopup, config: &config::Config) {
+    open.doc = detail::Doc::with_detail(&open.session.raw_row, &open.session.detail, config);
 }
 
-/// Re-render the document for the current depth. Cheap — it is string assembly
-/// — so it runs whenever the attempts arrive or the depth is toggled.
-fn rebuild_doc(
-    open: &mut DetailPopup,
-    aliases: &[config::ModelAlias],
-    hidden_fields: &[config::DisplayField],
-    key_aliases: &[config::ChannelKeyAlias],
-) {
-    open.row.channel_key_label = config::channel_key_text(
-        key_aliases,
-        &open.row.account_id,
-        open.row.channel.as_deref(),
-        open.row.channel_api_key_index,
-    );
-    if let Some(executions) = open.executions.as_mut() {
-        for execution in executions {
-            execution.channel_key_label = config::channel_key_text(
-                key_aliases,
-                &open.row.account_id,
-                execution
-                    .channel
-                    .as_ref()
-                    .and_then(|channel| channel.name.as_deref())
-                    .map(str::trim),
-                execution.channel_api_key_index,
-            );
-        }
-    }
-    open.doc = open.executions.as_ref().map(|executions| {
-        detail::Doc::build(
-            &open.row,
-            executions,
-            now_unix(),
-            open.depth,
-            aliases,
-            hidden_fields,
-        )
-    });
-}
-
-/// The window must accept focus while the sign-in form is up, and while the
-/// header id field is being typed in. A poll must not take it away mid-entry.
+/// The window must accept focus while the connection form is up, and while the
+/// header query box is being typed in. A poll must not take it away mid-entry.
 fn sync_activation(actions: &mut Vec<Action>) {
     let (wants, login, has) = State::with(|s| {
         (
-            s.app.is_login() || s.app.id_editing,
+            s.app.is_login() || s.app.query_editing,
             s.app.is_login(),
             s.activatable,
         )
@@ -2273,7 +1989,7 @@ pub(crate) fn apply_activation(hwnd: HWND, enabled: bool) {
     }
     // Both the sign-in form and the header id field are drawn by the panel,
     // so the panel itself takes the keyboard.
-    let typing = State::with(|s| s.app.is_login() || s.app.id_editing).unwrap_or(false);
+    let typing = State::with(|s| s.app.is_login() || s.app.query_editing).unwrap_or(false);
     if enabled && !settings_window::is_visible() && typing {
         unsafe {
             let _ = SetForegroundWindow(hwnd);
@@ -2355,10 +2071,12 @@ fn on_left_down(hwnd: HWND, lp: LPARAM, actions: &mut Vec<Action>) {
 
     // A click that lands on the well around the edit (its border is a pixel
     // or two wider than the control) still has to put the caret there.
-    if State::with(|s| !s.app.is_login()).unwrap_or(false) && panel::id_box_rect(m).contains(x, y) {
+    if State::with(|s| !s.app.is_login()).unwrap_or(false)
+        && panel::query_box_rect(m).contains(x, y)
+    {
         State::with(|s| {
-            s.app.id_editing = true;
-            s.app.id_caret = true;
+            s.app.query_editing = true;
+            s.app.query_caret = true;
             s.activatable = true;
         });
         apply_activation(hwnd, true);
@@ -2383,17 +2101,7 @@ fn on_left_down(hwnd: HWND, lp: LPARAM, actions: &mut Vec<Action>) {
             redraw = true;
             match action {
                 Some(LoginAction::Back) => actions.push(Action::ReturnToSettings),
-                Some(LoginAction::Submit) => actions.push(Action::SignIn),
-                Some(LoginAction::CycleMode) => {
-                    if let Some(f) = s.app.login.as_mut() {
-                        f.cycle_mode();
-                    }
-                }
-                Some(LoginAction::SetMethod(method)) => {
-                    if let Some(f) = s.app.login.as_mut() {
-                        f.set_method(method);
-                    }
-                }
+                Some(LoginAction::Submit) => actions.push(Action::SaveConnection),
                 Some(LoginAction::Focus(field)) => {
                     // The press both focuses the field and drops the caret
                     // where it landed; a drag that follows extends the
@@ -2414,17 +2122,14 @@ fn on_left_down(hwnd: HWND, lp: LPARAM, actions: &mut Vec<Action>) {
             return;
         }
 
-        // Filter chips take the press; card selection only happens on the list
-        // proper. Pinned mode is display-only: a click must not select a
-        // card or switch filters, only the right-click menu opens the detail
-        // page.
+        // Filter chips take the press; row selection only happens on the list
+        // proper. Pinned mode is display-only: a click must not select a row or
+        // switch filters, only the right-click menu opens anything. Filtering
+        // is local — the fetched rows are already in memory — so no round trip
+        // is needed.
         if let Some(f) = panel::hit_filter(m, &list_view(s), x, y) {
             if s.app.click_filter(f) {
-                let statuses = model::status_in(s.app.filter)
-                    .map(|values| values.into_iter().map(str::to_string).collect());
                 s.app.scroll = 0.0;
-                s.app.status = Some(("查询中…".into(), false));
-                s.worker.send(Command::SetStatusFilter(statuses));
             }
             redraw = true;
         } else if !s.app.config.pin_position
@@ -2432,6 +2137,7 @@ fn on_left_down(hwnd: HWND, lp: LPARAM, actions: &mut Vec<Action>) {
         {
             s.app.selected = Some(index);
         }
+        s.app.query_editing = false;
     });
 
     drop(painter);
@@ -2500,17 +2206,23 @@ fn list_view(s: &State) -> ListView<'_> {
         pinned: s.app.config.pin_position,
         filter: s.app.filter,
         hidden_fields: &s.app.config.hidden_fields,
-        id_query: s.app.id_query.as_deref(),
-        id_draft: &s.app.id_draft,
-        id_editing: s.app.id_editing,
-        id_caret: s.app.id_caret,
+        query: s.app.query.as_deref(),
+        query_draft: &s.app.query_draft,
+        query_editing: s.app.query_editing,
+        query_caret: s.app.query_caret,
     }
 }
 
 /// Hand the worker the current set of accounts and credentials.
 fn send_targets(s: &mut State) {
+    s.targets_revision = s.targets_revision.wrapping_add(1);
     let targets = worker::targets_from(&s.app.config, &s.app.stored);
     s.worker.send(Command::SetTargets(targets));
+    if let Some(open) = s.detail.as_mut() {
+        open.session.detail =
+            model::ExecutionDetail::unavailable("连接或凭据已更新，请重新打开详情");
+        rebuild_doc(open, &s.app.config);
+    }
 }
 
 fn on_wheel(hwnd: HWND, wp: WPARAM, actions: &mut Vec<Action>) {
@@ -2542,8 +2254,8 @@ fn on_key(hwnd: HWND, msg: u32, wp: WPARAM, actions: &mut Vec<Action>) {
             return;
         }
         let changed = State::with(|s| {
-            if s.app.id_editing {
-                type_id_char(&mut s.app, ch)
+            if s.app.query_editing {
+                type_query_char(&mut s.app, ch)
             } else if let Some(form) = s.app.login.as_mut() {
                 form.insert(ch);
                 true
@@ -2561,7 +2273,7 @@ fn on_key(hwnd: HWND, msg: u32, wp: WPARAM, actions: &mut Vec<Action>) {
 
     // Clipboard and selection shortcuts. Handled here because this window
     // draws its own controls: there is no edit control to implement them.
-    if ctrl_down() && State::with(|s| s.app.is_login() == true).unwrap_or(false) {
+    if ctrl_down() && State::with(|s| s.app.is_login()).unwrap_or(false) {
         // A plain 'v' arrives as WM_CHAR too, so swallow that one; see below.
         match vk {
             v if v == VK_V.0 => {
@@ -2597,16 +2309,16 @@ fn on_key(hwnd: HWND, msg: u32, wp: WPARAM, actions: &mut Vec<Action>) {
     let mut submit = false;
     let mut lookup = false;
     let handled = State::with(|s| {
-        if s.app.id_editing {
+        if s.app.query_editing {
             match vk {
                 v if v == VK_BACK.0 => {
-                    s.app.id_draft.pop();
-                    s.app.id_caret = true;
+                    s.app.query_draft.pop();
+                    s.app.query_caret = true;
                 }
                 v if v == VK_RETURN.0 => lookup = true,
                 v if v == VK_ESCAPE.0 => {
-                    s.app.id_draft.clear();
-                    s.app.id_editing = false;
+                    s.app.query_draft.clear();
+                    s.app.query_editing = false;
                     lookup = true;
                 }
                 _ => return false,
@@ -2648,27 +2360,23 @@ fn on_key(hwnd: HWND, msg: u32, wp: WPARAM, actions: &mut Vec<Action>) {
     }
     if lookup {
         // Escape clears the box, which also drops the filter.
-        if State::with(|s| !s.app.id_editing).unwrap_or(false) {
+        if State::with(|s| !s.app.query_editing).unwrap_or(false) {
             apply_activation(hwnd, false);
             State::with(|s| s.activatable = false);
         }
-        submit_id_query(hwnd);
+        submit_query(hwnd);
     } else if submit {
-        actions.push(Action::SignIn);
+        actions.push(Action::SaveConnection);
     } else if handled == Some(true) {
         actions.push(Action::Redraw);
     }
     let _ = hwnd;
 }
 
-/// Kick off sign-in with the form's current contents.
-/// A prepared submission, produced under the state borrow and acted on after.
-enum Submission {
-    Password(Credentials),
-    Token(String),
-}
-
-fn submit_login(hwnd: HWND) {
+/// Save the connection the form describes. A gateway key is optional: a
+/// loopback gateway answers without one, so the form's only requirement is a
+/// usable endpoint.
+fn save_connection(hwnd: HWND) {
     let prepared = State::with(|s| {
         let form = s.app.login.as_mut()?;
         if form.busy {
@@ -2680,69 +2388,45 @@ fn submit_login(hwnd: HWND) {
         }
         form.busy = true;
         form.error = None;
-        // The mode chosen in the form is what governs persistence, so it has to
-        // reach the config before `store` consults it.
-        s.app.config.credential_mode = form.mode;
-
-        let submission = match form.method {
-            Method::Password => Submission::Password(form.credentials()),
-            Method::Token => Submission::Token(form.trimmed_token()),
+        let id = match form.editing.clone() {
+            Some(id) => id,
+            None => s.app.config.fresh_account_id(),
         };
-        Some(submission)
-    });
+        let account = Account {
+            id: id.clone(),
+            name: form.resolved_name(),
+            endpoint: form.trimmed_endpoint(),
+        };
+        let key = form.trimmed_key();
+        s.app.config.upsert_account(account);
+        s.app.accounts = s.app.config.accounts.clone();
+        let mut stored = s.app.stored.clone();
+        stored.set_key(&id, &key);
+        s.app.stored = stored;
+        s.app.config.store(&s.app.stored);
+        s.app.save();
+        send_targets(s);
+        s.app.view = View::List;
+        s.app.login = None;
+        s.app.status = Some(("连接已保存".into(), false));
+        // A fresh save should look at the new gateway right away rather than
+        // wait out the current poll interval.
+        s.worker.send(Command::RefreshNow);
+        Some(())
+    })
+    .flatten();
 
-    let Some(submission) = prepared.flatten() else {
+    if prepared.is_none() {
         invalidate(hwnd);
         return;
-    };
-
-    match submission {
-        Submission::Password(creds) => {
-            // Remember what to persist once a token comes back; `Config::store`
-            // only writes the password when the selected mode allows it.
-            State::with(|s| {
-                let Some((id, _name)) = upsert_form_account(s) else {
-                    return;
-                };
-                let mut stored = s.app.stored.clone();
-                stored.set_credentials(&id, &creds);
-                s.app.stored = stored.clone();
-                s.app.config.store(&stored);
-                s.app.save();
-                // The account has to exist in the poll list before the answer
-                // lands, or the issued token would have nowhere to go.
-                send_targets(s);
-                s.worker.send(Command::SignIn { account: id, creds });
-            });
-        }
-        Submission::Token(token) => {
-            // A pasted token is used directly: no sign-in round trip, and the
-            // password never enters the process.
-            State::with(|s| {
-                let Some((id, name)) = upsert_form_account(s) else {
-                    return;
-                };
-                let mut stored = s.app.stored.clone();
-                // Keep live credentials in memory; Config::store alone decides
-                // what is allowed onto disk in “do not save” mode.
-                stored.set_token(&id, &token);
-                s.app.config.store(&stored);
-                s.app.stored = stored;
-                s.app.view = View::List;
-                s.app.status = Some((format!("账号 {name} 已登录"), false));
-                s.app.save();
-                send_targets(s);
-            });
-        }
     }
+
     let done = State::with(|s| s.settings_login.is_some() && !s.app.is_login()).unwrap_or(false);
     if done {
         settings_window::finish_login(hwnd, false);
     }
     let mut actions = Vec::new();
     sync_activation(&mut actions);
-    // A token sign-in finishes on this path (the password one finishes when the
-    // worker answers), so restore the list size here too.
     if State::with(|s| !s.app.is_login() && s.settings_login.is_none()).unwrap_or(false) {
         actions.push(Action::FitLogin(false));
     }
@@ -2750,40 +2434,11 @@ fn submit_login(hwnd: HWND) {
     invalidate(hwnd);
 }
 
-/// Create or update the account the sign-in form addresses and return its id
-/// and name. The panel's own endpoint and credential mode follow the form, so
-/// the next "add account" starts where this one left off.
-fn upsert_form_account(s: &mut State) -> Option<(String, String)> {
-    let form = s.app.login.as_ref()?;
-    let name = form.account_name.trim().to_string();
-    let endpoint = form.endpoint.trim().trim_end_matches('/').to_string();
-    let mode = form.mode;
-    let id = match form.editing.clone() {
-        Some(id) => id,
-        None => s.app.config.fresh_account_id(),
-    };
-    // An existing account keeps the project it resolved last time; a new one
-    // starts from the panel's own, which is the common single-project case.
-    let project_id = s
-        .app
-        .config
-        .account(&id)
-        .map(|a| a.project_id.clone())
-        .unwrap_or_else(|| s.app.config.project_id.clone());
-    s.app.config.upsert_account(Account {
-        id: id.clone(),
-        name: name.clone(),
-        endpoint: endpoint.clone(),
-        project_id,
-    });
-    s.app.config.endpoint = endpoint;
-    s.app.config.credential_mode = mode;
-    s.app.accounts = s.app.config.accounts.clone();
-    Some((id, name))
-}
-
 fn on_command(wp: WPARAM, actions: &mut Vec<Action>) {
-    let id = (wp.0 & 0xFFFF) as usize;
+    let id = wp.0 & 0xFFFF;
+    if !is_menu_command(id) {
+        return;
+    }
     State::with(|s| match id {
         MENU_REFRESH => s.worker.send(Command::RefreshNow),
         MENU_TOPMOST => {
@@ -2805,23 +2460,6 @@ fn on_command(wp: WPARAM, actions: &mut Vec<Action>) {
         MENU_PIN_POSITION => {
             s.app.config.pin_position = !s.app.config.pin_position;
         }
-        MENU_MODE_CARDS => actions.push(Action::SetDisplayMode(LayoutMode::Cards)),
-        MENU_MODE_SINGLE_LINE => actions.push(Action::SetDisplayMode(LayoutMode::SingleLine)),
-        MENU_MODE_TABLE => actions.push(Action::SetDisplayMode(LayoutMode::Table)),
-        MENU_OPEN => {
-            // Reached with no or one account; with several the entry becomes a
-            // submenu and the account branch below handles it. An account's own
-            // endpoint wins over the panel-level one, which may be stale.
-            let endpoint = s
-                .app
-                .config
-                .accounts
-                .first()
-                .map(|a| a.endpoint.clone())
-                .unwrap_or_else(|| s.app.config.endpoint.clone());
-            let url = format!("{}/project/requests", endpoint.trim_end_matches('/'));
-            actions.push(Action::OpenUrl(url));
-        }
         MENU_SETTINGS => actions.push(Action::ShowSettings(popup::cursor())),
         MENU_QUIT => actions.push(Action::Quit),
         MENU_ROWS_5 => actions.push(Action::ResizeToRows(5)),
@@ -2831,22 +2469,29 @@ fn on_command(wp: WPARAM, actions: &mut Vec<Action>) {
         _ if (MENU_FONT_BASE..=MENU_FONT_MAX).contains(&id) => {
             actions.push(Action::SetFontSize((10 + (id - MENU_FONT_BASE)) as f32));
         }
-        _ if (MENU_OPEN_ACCOUNT_BASE..=MENU_OPEN_ACCOUNT_MAX).contains(&id) => {
-            if let Some(account) = s.app.config.accounts.get(id - MENU_OPEN_ACCOUNT_BASE) {
-                let url = format!(
-                    "{}/project/requests",
-                    account.endpoint.trim_end_matches('/')
-                );
-                actions.push(Action::OpenUrl(url));
-            }
-        }
-        _ => return,
+        _ => {}
     });
     // Settings changed by a menu command are persisted after the borrow ends.
     if id == MENU_TOPMOST || id == MENU_PIN_POSITION || id == MENU_BOTTOMMOST {
         actions.push(Action::Save);
     }
     actions.push(Action::Redraw);
+}
+
+fn is_menu_command(id: usize) -> bool {
+    matches!(
+        id,
+        MENU_REFRESH
+            | MENU_SETTINGS
+            | MENU_QUIT
+            | MENU_TOPMOST
+            | MENU_BOTTOMMOST
+            | MENU_PIN_POSITION
+            | MENU_ROWS_5
+            | MENU_ROWS_10
+            | MENU_ROWS_15
+            | MENU_ROWS_20
+    ) || (MENU_FONT_BASE..=MENU_FONT_MAX).contains(&id)
 }
 
 fn show_menu(hwnd: HWND) {
@@ -2935,66 +2580,7 @@ fn show_menu(hwnd: HWND) {
                 PCWSTR(sub_label.as_mut_ptr()),
             );
         }
-        // Display-mode submenu: one layout at a time, the current one ticked.
-        let current_mode =
-            State::with(|s| s.app.config.layout_mode()).unwrap_or(LayoutMode::Table);
-        if let Ok(mode_menu) = CreatePopupMenu() {
-            let items: &[(&str, usize, LayoutMode)] = &[
-                ("卡片", MENU_MODE_CARDS, LayoutMode::Cards),
-                ("单行卡片", MENU_MODE_SINGLE_LINE, LayoutMode::SingleLine),
-                ("表格", MENU_MODE_TABLE, LayoutMode::Table),
-            ];
-            for &(text, mid, mode) in items {
-                let mut wide = label(text);
-                let mut flags = MF_STRING;
-                if current_mode == mode {
-                    // Radio dots rather than ticks: the three are exclusive.
-                    flags |= MF_CHECKED | MENU_ITEM_FLAGS(MFT_RADIOCHECK.0);
-                }
-                let _ = AppendMenuW(mode_menu, flags, mid, PCWSTR(wide.as_mut_ptr()));
-            }
-            let mut sub_label = label("显示模式");
-            let _ = AppendMenuW(
-                menu,
-                MF_STRING | MF_POPUP,
-                mode_menu.0 as usize,
-                PCWSTR(sub_label.as_mut_ptr()),
-            );
-        }
-
         add("刷新", MENU_REFRESH, false, true);
-        // Several accounts are several servers, so the entry turns into a
-        // submenu and the user picks which server's requests page to open.
-        let accounts = State::with(|s| s.app.config.accounts.clone()).unwrap_or_default();
-        if accounts.len() < 2 {
-            add("打开请求页", MENU_OPEN, false, true);
-        } else if let Ok(open_menu) = CreatePopupMenu() {
-            for (i, account) in accounts
-                .iter()
-                .take(MENU_OPEN_ACCOUNT_MAX - MENU_OPEN_ACCOUNT_BASE + 1)
-                .enumerate()
-            {
-                let text = if account.name.trim().is_empty() {
-                    config::endpoint_host(&account.endpoint)
-                } else {
-                    account.name.clone()
-                };
-                let mut wide = label(&text);
-                let _ = AppendMenuW(
-                    open_menu,
-                    MF_STRING,
-                    MENU_OPEN_ACCOUNT_BASE + i,
-                    PCWSTR(wide.as_mut_ptr()),
-                );
-            }
-            let mut sub_label = label("打开请求页");
-            let _ = AppendMenuW(
-                menu,
-                MF_STRING | MF_POPUP,
-                open_menu.0 as usize,
-                PCWSTR(sub_label.as_mut_ptr()),
-            );
-        }
 
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         add("固定窗口位置", MENU_PIN_POSITION, pinned, true);
@@ -3027,22 +2613,6 @@ fn show_menu(hwnd: HWND) {
     }
 }
 
-/// Open a URL in the default browser without stealing focus from the panel.
-fn open_url_async(url: &str) {
-    let wide_op: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
-    let wide_url: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
-    unsafe {
-        let _ = ShellExecuteW(
-            None,
-            PCWSTR(wide_op.as_ptr()),
-            PCWSTR(wide_url.as_ptr()),
-            PCWSTR::null(),
-            PCWSTR::null(),
-            SW_SHOWNOACTIVATE,
-        );
-    }
-}
-
 // --- error-detail popup ------------------------------------------------------
 
 /// Metrics for the popup's client area. The scale is the panel's rather than
@@ -3062,47 +2632,10 @@ fn detail_metrics(hwnd: HWND) -> detail::Popup {
 }
 
 /// Open at the clicked card, keeping the whole popup inside that monitor.
-fn detail_geometry(point: POINT, scale: f32, depth: detail::Depth) -> WindowState {
+fn detail_geometry(point: POINT, scale: f32) -> WindowState {
     let width = ui::layout::device_px(detail::POPUP_W as i32, scale);
-    let height = ui::layout::device_px(detail::default_height(depth) as i32, scale);
+    let height = ui::layout::device_px(detail::POPUP_H as i32, scale);
     popup::at_point(point, width, height)
-}
-
-/// Give the popup the height its form is authored for, keeping its top-left
-/// corner and staying on screen. Called when the form changes, so the full
-/// document is not read through a letterbox and the compact one is not shown in
-/// a half-empty window.
-fn fit_detail_height(hwnd: HWND, scale: f32, depth: detail::Depth) {
-    let mut rc = RECT::default();
-    unsafe {
-        let _ = GetWindowRect(hwnd, &mut rc);
-    }
-    let work = work_area_for(hwnd);
-    let height =
-        ui::layout::device_px(detail::default_height(depth) as i32, scale).min(work.3 - work.1);
-    let placed = config::clamp_to_virtual_screen(
-        WindowState {
-            x: rc.left,
-            y: rc.top,
-            width: rc.right - rc.left,
-            height,
-        },
-        work,
-        scale,
-        // The popup is a document, not the list: its floor is the card one.
-        LayoutMode::Cards,
-    );
-    unsafe {
-        let _ = SetWindowPos(
-            hwnd,
-            None,
-            placed.x,
-            placed.y,
-            placed.width,
-            placed.height,
-            SWP_NOZORDER | SWP_NOACTIVATE,
-        );
-    }
 }
 
 /// Create the popup window. It is owned by the panel, so it always stays above
@@ -3142,96 +2675,80 @@ fn create_detail_window(panel: HWND, geom: WindowState) -> Option<HWND> {
     Some(hwnd)
 }
 
-/// The form the popup opens in: whichever is already on screen, so a reader who
-/// asked for the full document keeps it while walking through several failures.
-/// A fresh popup starts compact.
-fn current_depth() -> detail::Depth {
-    State::with(|s| s.detail.as_ref().map(|open| open.depth))
-        .flatten()
-        .unwrap_or(detail::Depth::Compact)
-}
-
-/// Open — or refocus — the detail popup for a row of the list.
+/// Action-owned window operations run only after releasing the State borrow.
+/// The UI builds a summary now and queues one detail fetch, not one per paint.
 fn open_detail(panel: HWND, index: usize, point: POINT) {
-    enum Next {
-        /// This request is already on screen; just raise the window.
-        Focus(HWND),
-        /// Fetch the executions; `None` means the window still has to be built.
-        Load(Option<HWND>, Box<model::Row>, String, f32),
-    }
-
-    // Read before borrowing the state below: `current_depth` uses the same cell.
-    let depth = current_depth();
     let prepared = State::with(|s| {
-        let row = s.app.rows.get(index)?.clone();
-        if let Some(open) = s.detail.as_ref().filter(|p| p.row.id == row.id) {
-            // Clicking the same card again must not throw the answer away.
-            return Some(Next::Focus(open.hwnd));
-        }
-        // The console link belongs to the server the request came from, which
-        // is not necessarily the panel's own endpoint once accounts differ.
+        let identity = s.app.rows.get(index)?.detail_identity();
+        let raw = s
+            .app
+            .raw_rows()
+            .iter()
+            .find(|r| r.detail_identity() == identity)?
+            .clone();
+        Some((s.detail.as_ref().map(|p| p.hwnd), raw, s.scale))
+    })
+    .flatten();
+    let Some((existing, raw, scale)) = prepared else {
+        return;
+    };
+    let hwnd = match existing {
+        Some(hwnd) => hwnd,
+        None => match create_detail_window(panel, detail_geometry(point, scale)) {
+            Some(hwnd) => hwnd,
+            None => return,
+        },
+    };
+    State::with(|s| {
+        let identity = raw.detail_identity();
         let endpoint = s
             .app
             .config
-            .account(&row.account_id)
+            .account(&raw.account_id)
             .map(|a| a.endpoint.clone())
-            .unwrap_or_else(|| s.app.config.endpoint.clone());
-        let url = model::request_url(&endpoint, &row.id);
-        let existing = s.detail.as_ref().map(|p| p.hwnd);
-        Some(Next::Load(existing, Box::new(row), url, s.scale))
-    })
-    .flatten();
-
-    let Some(next) = prepared else {
-        return;
-    };
-    match next {
-        Next::Focus(hwnd) => unsafe {
-            place_detail_at(hwnd, point);
-            let _ = ShowWindow(hwnd, SW_SHOW);
-            let _ = SetForegroundWindow(hwnd);
-        },
-        Next::Load(existing, row, url, scale) => {
-            let hwnd = match existing {
-                Some(hwnd) => hwnd,
-                None => match create_detail_window(
-                    panel,
-                    detail_geometry(point, scale, current_depth()),
-                ) {
-                    Some(hwnd) => hwnd,
-                    None => return,
-                },
+            .unwrap_or_default();
+        let same = s.detail.as_ref().is_some_and(|p| {
+            p.session.ticket.identity == identity
+                && p.session.ticket.revision == s.targets_revision
+                && p.session.ticket.endpoint == endpoint
+        });
+        if same {
+            let open = s.detail.as_mut().unwrap();
+            open.session.raw_row = raw;
+            rebuild_doc(open, &s.app.config);
+        } else {
+            s.detail_nonce = s.detail_nonce.wrapping_add(1);
+            let ticket = model::DetailTicket {
+                nonce: s.detail_nonce,
+                revision: s.targets_revision,
+                endpoint,
+                identity,
             };
-            let id = row.id.clone();
-            let account = row.account_id.clone();
-            State::with(|s| {
-                s.detail = Some(DetailPopup {
-                    hwnd,
-                    row: *row,
-                    url,
-                    executions: None,
-                    doc: None,
-                    error: None,
-                    depth,
-                    scroll: 0.0,
-                    content_h: 0.0,
-                    hover: None,
-                });
-                // The request has to be fetched from the account that listed
-                // it: another account on another server cannot see it.
-                s.worker.send(Command::FetchDetail { account, id });
+            let session = model::DetailSession::new(raw.clone(), ticket.clone());
+            let doc = detail::Doc::with_detail(&raw, &session.detail, &s.app.config);
+            s.detail = Some(DetailPopup {
+                hwnd,
+                session,
+                doc,
+                scroll: 0.0,
+                content_h: 0.0,
+                hover: None,
             });
-            if existing.is_some() {
-                place_detail_at(hwnd, point);
-            }
-            unsafe {
-                let _ = ShowWindow(hwnd, SW_SHOW);
-                let _ = SetForegroundWindow(hwnd);
-                let _ = SetFocus(Some(hwnd));
-            }
-            invalidate(hwnd);
+            s.worker.send(Command::FetchDetail {
+                ticket: Box::new(ticket),
+                row: Box::new(raw),
+            });
         }
+    });
+    if existing.is_some() {
+        place_detail_at(hwnd, point);
     }
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = SetForegroundWindow(hwnd);
+        let _ = SetFocus(Some(hwnd));
+    }
+    invalidate(hwnd);
 }
 
 fn place_detail_at(hwnd: HWND, point: POINT) {
@@ -3255,13 +2772,7 @@ fn place_detail_at(hwnd: HWND, point: POINT) {
 
 /// Put the whole detail document on the clipboard.
 fn copy_detail_text() {
-    let text = State::with(|s| {
-        s.detail
-            .as_ref()
-            .and_then(|p| p.doc.as_ref())
-            .map(detail::plain_text)
-    })
-    .flatten();
+    let text = State::with(|s| s.detail.as_ref().map(|p| detail::plain_text(&p.doc))).flatten();
     if let Some(text) = text {
         set_clipboard_text(&text);
     }
@@ -3335,14 +2846,7 @@ unsafe extern "system" fn detail_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             let popup = detail_metrics(hwnd);
             match detail::hit_button(&popup, x, y) {
                 Some(Button::Close) => actions.push(Action::CloseWindow),
-                Some(Button::Toggle) => actions.push(Action::ToggleDetail),
                 Some(Button::Copy) => actions.push(Action::CopyDetail),
-                Some(Button::Open) => {
-                    let url = State::with(|s| s.detail.as_ref().map(|p| p.url.clone())).flatten();
-                    if let Some(url) = url {
-                        actions.push(Action::OpenUrl(url));
-                    }
-                }
                 None => {}
             }
         }
@@ -3420,7 +2924,12 @@ unsafe extern "system" fn detail_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         }
         WM_CLOSE => actions.push(Action::CloseWindow),
         WM_DESTROY => {
-            State::with(|s| s.detail = None);
+            State::with(|s| {
+                if s.detail.as_ref().is_some_and(|p| p.hwnd == hwnd) {
+                    s.detail = None;
+                    s.worker.send(Command::CancelDetail);
+                }
+            });
         }
         _ => return unsafe { DefWindowProcW(hwnd, msg, wp, lp) },
     }
@@ -3549,10 +3058,7 @@ fn paint_detail(hwnd: HWND) {
                     return 0.0;
                 };
                 let view = detail::View {
-                    row: &open.row,
-                    doc: open.doc.as_ref(),
-                    error: open.error.as_deref(),
-                    depth: open.depth,
+                    doc: &open.doc,
                     scroll: open.scroll,
                     hover: open.hover,
                 };

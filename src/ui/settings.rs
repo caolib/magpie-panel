@@ -1,10 +1,7 @@
 //! Settings content and geometry, shared by painting, pointer and keyboard input.
 
 use crate::app::{App, ProbeState};
-use crate::config::{
-    CredentialMode, DisplayField, FONT_SIZE_MAX, FONT_SIZE_MIN, HiddenChannel, OPACITY_MAX,
-    OPACITY_MIN,
-};
+use crate::config::{AliasKind, DisplayField, HiddenProvider, OPACITY_MAX, OPACITY_MIN};
 use crate::font_catalog::InstalledFont;
 use crate::theme::{self, Fonts, Painter};
 use crate::ui::layout::Rect;
@@ -19,69 +16,44 @@ const FOOTER: f32 = 70.0;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Tab {
     #[default]
-    Display,
+    Appearance,
     Fields,
-    Fonts,
     Accounts,
-    Channels,
-    Models,
+    Providers,
+    Mappings,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
     Tab(Tab),
-    Rows(usize),
     Field(DisplayField),
     ShowAllFields,
-    /// The font-size cell, covered by a native edit box that types the number.
-    FontSizeInput,
-    /// Apply what the font-size box holds; unparsable input reverts.
-    SaveFontSize,
     /// The opacity cell, covered by a native edit box that types the number.
     OpacityInput,
     /// Apply what the opacity box holds; unparsable input reverts.
     SaveOpacity,
     FontFamily(String),
     FontSearch,
-    SingleLine,
-    TableMode,
-    Pin,
-    Topmost,
-    Bottommost,
     AddAccount,
     Login(String),
-    /// Ask the worker to prove one account's credentials still work.
+    /// Ask the worker to prove one connection still answers.
     TestAccount(String),
     RemoveAccount(String),
-    CredentialMode(CredentialMode),
-    ClearCredentials,
-    Channel(HiddenChannel),
-    ClearChannels,
-    /// The model-alias form: the prefix cell, covered by a native edit box.
+    /// Forget every stored gateway key, keeping the connections themselves.
+    ClearKeys,
+    /// Hide or show one (connection, provider) pair.
+    Provider(HiddenProvider),
+    ClearProviders,
+    /// Switch which display name the mapping form edits.
+    AliasKind(AliasKind),
+    /// The match cell, covered by a native edit box.
     AliasFromInput,
     /// The short form cell, also a native edit box.
     AliasToInput,
-    /// Take both boxes' text and add (or update) the mapping.
+    /// Take both boxes' text and add (or update) the mapping of the active kind.
     AddAlias,
-    /// Drop the mapping at this index.
-    RemoveAlias(usize),
-    /// Switch the shared "名称映射" tab to the model (false) or key (true) form.
-    MappingPage(bool),
-    /// Pick the account/channel a key alias applies to. Selection is temporary.
-    KeyTarget(HiddenChannel),
-    /// The key-index cell, covered by a native edit box that accepts integers.
-    KeyIndexInput,
-    /// The key-alias cell, also covered by a native edit box.
-    KeyAliasInput,
-    /// Take the target, index and alias and add (or update) the mapping.
-    AddKeyAlias,
-    /// Load one saved mapping back into the form.
-    EditKeyAlias(usize),
-    /// Drop the key mapping at this index.
-    RemoveKeyAlias(usize),
-    Refresh,
-    OpenRequests,
-    Quit,
+    /// Drop the mapping at this index of one kind.
+    RemoveAlias(AliasKind, usize),
     Close,
     Confirm,
     Cancel,
@@ -99,18 +71,17 @@ pub struct State {
     pub font_names: Vec<InstalledFont>,
     pub font_matches: Vec<usize>,
     pub font_query: String,
-    /// The "名称映射" tab has two forms: model names (false) and channel keys
-    /// (true). The top-level tab count stays at six.
-    pub mapping_keys: bool,
-    /// The account/channel picked for the key form. Not persisted. It is
-    /// fixed when the Key subpage opens and afterwards changes only on a
-    /// click, so polling cannot move the target under the user's cursor.
-    pub key_alias_target: Option<HiddenChannel>,
-    /// Why the last key-mapping attempt was rejected, shown on the form.
-    pub key_alias_error: Option<String>,
+    /// Which alias list the mapping form edits.
+    pub alias_kind: AliasKind,
 }
 
 impl State {
+    pub fn font_focused(&self) -> bool {
+        self.tab == Tab::Appearance
+            && self.pending.is_none()
+            && matches!(self.focus, Some(Action::FontSearch | Action::FontFamily(_)))
+    }
+
     pub fn set_font_query(&mut self, query: String) {
         let lower = query.to_lowercase();
         self.font_matches = self
@@ -124,38 +95,6 @@ impl State {
         self.hover = None;
         self.pressed = None;
     }
-
-    /// Freeze the first target when the Key subpage opens. Once a target is
-    /// chosen, later polls may add channels but must not move the selection.
-    pub fn ensure_key_alias_target(&mut self, targets: &[HiddenChannel]) {
-        if self.key_alias_target.is_none() {
-            self.key_alias_target = targets.first().cloned();
-        }
-    }
-}
-
-/// Targets for the key-alias form: every account/channel pair seen in the
-/// fetched requests, plus pairs that already have a saved alias. The latter
-/// may be absent from the current rows and must stay editable.
-pub fn key_targets(app: &App) -> Vec<HiddenChannel> {
-    let mut out = app.channel_filters();
-    for alias in &app.config.channel_key_aliases {
-        let entry = HiddenChannel {
-            account_id: alias.account_id.clone(),
-            channel: alias.channel.clone(),
-        };
-        if !out.contains(&entry) {
-            out.push(entry);
-        }
-    }
-    out.sort_by(|a, b| (&a.account_id, &a.channel).cmp(&(&b.account_id, &b.channel)));
-    out
-}
-
-/// Parse the native key-index box. Pasting is not filtered, so the whole text
-/// is parsed again: `2.5`, `-1` and blanks are all rejected.
-pub fn normalize_key_index(text: &str) -> Option<i64> {
-    text.trim().parse::<i64>().ok().filter(|index| *index >= 0)
 }
 
 pub struct Control {
@@ -170,15 +109,6 @@ pub struct Control {
     pub check: bool,
 }
 
-struct Label {
-    rect: Rect,
-    text: String,
-    heading: bool,
-    /// Overrides the default text colour, for labels that carry a verdict
-    /// (green when an account answers, red when it does not).
-    color: Option<u32>,
-}
-
 pub struct Layout {
     pub width: f32,
     pub height: f32,
@@ -186,7 +116,15 @@ pub struct Layout {
     labels: Vec<Label>,
     pub content_height: f32,
     content_top: f32,
-    font_header: Option<String>,
+}
+
+struct Label {
+    rect: Rect,
+    text: String,
+    heading: bool,
+    /// Overrides the default text colour, for labels that carry a verdict
+    /// (green when a connection answers, red when it does not).
+    color: Option<u32>,
 }
 
 impl Layout {
@@ -197,22 +135,15 @@ impl Layout {
             controls: Vec::new(),
             labels: Vec::new(),
             content_height: 0.0,
-            content_top: match state.tab {
-                Tab::Fonts => TOP + 112.0,
-                // The model/key switch stays in the header of this tab.
-                Tab::Models => TOP + 44.0,
-                _ => TOP,
-            },
-            font_header: None,
+            content_top: TOP,
         };
-        let tab_w = (width - 56.0) / 6.0;
+        let tab_w = (width - 56.0) / 5.0;
         for (i, (tab, label)) in [
-            (Tab::Display, "显示与窗口".to_string()),
+            (Tab::Appearance, "外观".to_string()),
             (Tab::Fields, "属性显示".to_string()),
-            (Tab::Fonts, "字体".to_string()),
-            (Tab::Accounts, format!("账号 · {}", app.accounts.len())),
-            (Tab::Channels, "渠道过滤".to_string()),
-            (Tab::Models, "名称映射".to_string()),
+            (Tab::Accounts, format!("连接 · {}", app.accounts.len())),
+            (Tab::Providers, "供应商过滤".to_string()),
+            (Tab::Mappings, "名称映射".to_string()),
         ]
         .into_iter()
         .enumerate()
@@ -231,43 +162,12 @@ impl Layout {
                 false,
             );
         }
-        if state.tab == Tab::Models {
-            // Fixed above the scrolling body, so the two forms are always one
-            // click away. `content_top` below leaves room for this row.
-            l.button(
-                Rect {
-                    x: 24.0,
-                    y: TOP + 6.0,
-                    w: 110.0,
-                    h: 30.0,
-                },
-                "模型映射",
-                Action::MappingPage(false),
-                !state.mapping_keys,
-                false,
-                false,
-            );
-            l.button(
-                Rect {
-                    x: 140.0,
-                    y: TOP + 6.0,
-                    w: 100.0,
-                    h: 30.0,
-                },
-                "Key映射",
-                Action::MappingPage(true),
-                state.mapping_keys,
-                false,
-                false,
-            );
-        }
         match state.tab {
-            Tab::Display => l.display(app),
+            Tab::Appearance => l.appearance(app, state),
             Tab::Fields => l.fields(app),
-            Tab::Fonts => l.fonts(app, state),
             Tab::Accounts => l.accounts(app),
-            Tab::Channels => l.channels(app),
-            Tab::Models => l.models(app, state),
+            Tab::Providers => l.providers(app),
+            Tab::Mappings => l.mappings(app, state),
         }
         let y = height - 40.0;
         if state.pending.is_some() {
@@ -298,19 +198,6 @@ impl Layout {
                 false,
             );
         } else {
-            l.button(
-                Rect {
-                    x: 20.0,
-                    y,
-                    w: 90.0,
-                    h: 28.0,
-                },
-                "退出面板",
-                Action::Quit,
-                false,
-                false,
-                false,
-            );
             l.button(
                 Rect {
                     x: width - 104.0,
@@ -348,7 +235,7 @@ impl Layout {
         });
     }
 
-    /// A two-column checkbox row: `checked` means the cell is shown on cards.
+    /// A two-column checkbox row: `checked` means the cell is shown.
     fn checkbox(&mut self, rect: Rect, label: impl Into<String>, action: Action, checked: bool) {
         self.controls.push(Control {
             rect,
@@ -403,100 +290,18 @@ impl Layout {
         });
     }
 
-    fn choices(&mut self, y: f32, choices: Vec<(String, Action, bool)>, columns: usize) {
-        let w = (self.width - 48.0 - (columns - 1) as f32 * 6.0) / columns as f32;
-        for (i, (label, action, selected)) in choices.into_iter().enumerate() {
-            self.button(
-                Rect {
-                    x: 24.0 + (i % columns) as f32 * (w + 6.0),
-                    y: y + (i / columns) as f32 * 36.0,
-                    w,
-                    h: 30.0,
-                },
-                label,
-                action,
-                selected,
-                false,
-                true,
-            );
-        }
-    }
-
-    fn toggle(&mut self, y: f32, label: &str, hint: &str, action: Action, on: bool) {
-        self.label(y, label, true);
-        self.label(y + 22.0, hint, false);
-        // Leave room for the switch even at the minimum window width.
-        for label in self.labels.iter_mut().rev().take(2) {
-            label.rect.w -= 100.0;
-        }
-        self.button(
-            Rect {
-                x: self.width - 104.0,
-                y: y + 6.0,
-                w: 80.0,
-                h: 30.0,
-            },
-            if on { "已开启" } else { "已关闭" },
-            action,
-            on,
-            false,
-            true,
-        );
-    }
-
-    fn display(&mut self, app: &App) {
-        let c = &app.config;
-        self.label(0.0, format!("显示数量 · 当前 {} 条", c.row_limit), true);
-        self.choices(
-            32.0,
-            [5, 10, 15, 20]
-                .into_iter()
-                .map(|n| (format!("{n} 条"), Action::Rows(n), c.row_limit == n as i64))
-                .collect(),
-            4,
-        );
-        self.label(80.0, format!("字号 · 当前 {} px", c.font_size), true);
-        // This cell is a native edit box (see `font_size_rect`); the control
-        // below only carries its geometry so painting and Tab order agree.
-        self.controls.push(Control {
-            rect: Rect {
-                x: 24.0,
-                y: 112.0,
-                w: 120.0,
-                h: 30.0,
-            },
-            label: String::new(),
-            action: Action::FontSizeInput,
-            selected: false,
-            danger: false,
-            body: true,
-            check: false,
-        });
-        self.button(
-            Rect {
-                x: 152.0,
-                y: 112.0,
-                w: 80.0,
-                h: 30.0,
-            },
-            "保存",
-            Action::SaveFontSize,
-            false,
-            false,
-            true,
-        );
+    fn appearance(&mut self, app: &App, state: &State) {
         self.label(
-            150.0,
-            format!("输入 {FONT_SIZE_MIN}–{FONT_SIZE_MAX} 之间的数值(可含小数),点保存生效"),
-            false,
+            0.0,
+            format!("面板透明度 · 当前 {}%", app.config.opacity),
+            true,
         );
-        self.label(196.0, format!("面板透明度 · 当前 {}%", c.opacity), true);
         // This cell is a native edit box; the control below only carries its
         // geometry so painting and Tab order agree.
         self.controls.push(Control {
             rect: Rect {
                 x: 24.0,
-                y: 228.0,
+                y: 32.0,
                 w: 120.0,
                 h: 30.0,
             },
@@ -510,7 +315,7 @@ impl Layout {
         self.button(
             Rect {
                 x: 152.0,
-                y: 228.0,
+                y: 32.0,
                 w: 80.0,
                 h: 30.0,
             },
@@ -521,61 +326,21 @@ impl Layout {
             true,
         );
         self.label(
-            266.0,
+            70.0,
             format!("输入 {OPACITY_MIN}–{OPACITY_MAX} 之间的数值(可含小数),点保存生效"),
             false,
         );
-        self.toggle(
-            312.0,
-            "单行模式",
-            "压缩卡片高度，保持显示条数",
-            Action::SingleLine,
-            c.single_line,
-        );
-        self.toggle(
-            374.0,
-            "表格模式",
-            "一行一条记录，窗口宽度随列宽自动调整",
-            Action::TableMode,
-            c.table_mode,
-        );
-        self.toggle(
-            436.0,
-            "固定窗口位置",
-            "锁定面板的移动和大小调整",
-            Action::Pin,
-            c.pin_position,
-        );
-        self.toggle(
-            498.0,
-            "置顶",
-            "让面板保持在其他窗口上方",
-            Action::Topmost,
-            c.always_on_top,
-        );
-        self.toggle(
-            560.0,
-            "置底",
-            "让面板保持在其他窗口下方",
-            Action::Bottommost,
-            c.always_on_bottom,
-        );
-        self.label(630.0, "常用操作", true);
-        self.choices(
-            662.0,
-            vec![
-                ("刷新请求".into(), Action::Refresh, false),
-                ("打开请求页".into(), Action::OpenRequests, false),
-            ],
-            2,
-        );
-        self.content_height = 710.0;
+        self.fonts(app, state, 106.0);
     }
 
     fn fields(&mut self, app: &App) {
         let hidden = app.config.hidden_fields.len();
         self.label(0.0, format!("属性显示 · 已隐藏 {hidden} 项"), true);
-        self.label(26.0, "取消勾选可在卡片上隐藏对应信息，默认全部显示", false);
+        self.label(
+            26.0,
+            "勾选显示对应列，取消勾选隐藏；首次默认显示常用字段",
+            false,
+        );
         self.button(
             Rect {
                 x: 24.0,
@@ -605,8 +370,8 @@ impl Layout {
     }
 
     fn accounts(&mut self, app: &App) {
-        self.label(0.0, "账号管理", true);
-        self.label(26.0, "多个账号的请求会合并显示", false);
+        self.label(0.0, "Magpie 连接", true);
+        self.label(26.0, "多个网关的请求会合并显示", false);
         self.button(
             Rect {
                 x: self.width - 120.0,
@@ -614,7 +379,7 @@ impl Layout {
                 w: 96.0,
                 h: 30.0,
             },
-            "添加账号",
+            "添加连接",
             Action::AddAccount,
             false,
             false,
@@ -622,14 +387,14 @@ impl Layout {
         );
         let mut y = 68.0;
         if app.accounts.is_empty() {
-            self.label(y, "暂无账号，点击「添加账号」连接 AxonHub", false);
+            self.label(y, "暂无连接，点击「添加连接」连接 Magpie", false);
             y += 44.0;
         }
         for account in &app.accounts {
             self.label(y, &account.name, true);
             self.label(y + 22.0, &account.endpoint, false);
             // A test result, while it is the freshest thing known about the
-            // account, stands in for the poll's own verdict.
+            // connection, stands in for the poll's own verdict.
             let probe = app.probe.as_ref().filter(|p| p.id == account.id);
             let (status, status_color) = match probe.map(|p| &p.state) {
                 Some(ProbeState::Running) => ("正在测试连接…".to_string(), None),
@@ -652,7 +417,16 @@ impl Layout {
                     None,
                 ),
             };
-            self.label_colored(y + 44.0, status, false, status_color);
+            let has_key = app.stored.key_for(&account.id).is_some();
+            let detail = format!(
+                "{status} · {}",
+                if has_key {
+                    "已保存密钥"
+                } else {
+                    "本机免密钥"
+                }
+            );
+            self.label_colored(y + 44.0, detail, false, status_color);
             for label in self.labels.iter_mut().rev().take(3) {
                 label.rect.w -= 208.0;
             }
@@ -676,7 +450,7 @@ impl Layout {
                     w: 96.0,
                     h: 30.0,
                 },
-                "编辑 / 登录",
+                "编辑",
                 Action::Login(account.id.clone()),
                 false,
                 false,
@@ -689,7 +463,7 @@ impl Layout {
                     w: 96.0,
                     h: 28.0,
                 },
-                "删除账号",
+                "删除连接",
                 Action::RemoveAccount(account.id.clone()),
                 false,
                 true,
@@ -697,52 +471,29 @@ impl Layout {
             );
             y += 92.0;
         }
-        self.label(y, "凭据保存方式", true);
-        self.choices(
-            y + 32.0,
-            [
-                CredentialMode::None,
-                CredentialMode::Token,
-                CredentialMode::Password,
-            ]
-            .into_iter()
-            .map(|mode| {
-                (
-                    mode.label().into(),
-                    Action::CredentialMode(mode),
-                    app.config.credential_mode == mode,
-                )
-            })
-            .collect(),
-            3,
-        );
+        self.label(y, "网关密钥", true);
         self.label(
-            y + 70.0,
-            "保存方式适用于所有账号，凭据由 Windows 加密",
-            false,
-        );
-        self.label(
-            y + 96.0,
-            "清除凭据会退出所有账号，保留账号名称与地址",
+            y + 24.0,
+            "密钥由 Windows 加密保存；本机网关不需要密钥",
             false,
         );
         self.button(
             Rect {
                 x: 24.0,
-                y: y + 130.0,
+                y: y + 56.0,
                 w: 170.0,
                 h: 32.0,
             },
-            "清除保存的凭据",
-            Action::ClearCredentials,
+            "清除保存的密钥",
+            Action::ClearKeys,
             false,
             true,
             true,
         );
-        self.content_height = y + 182.0;
+        self.content_height = y + 108.0;
     }
 
-    fn fonts(&mut self, app: &App, state: &State) {
+    fn fonts(&mut self, app: &App, state: &State, top: f32) {
         let current = match (
             app.config.font_family.is_empty(),
             app.config.cjk_font_family.is_empty(),
@@ -755,11 +506,16 @@ impl Layout {
                 app.config.font_family, app.config.cjk_font_family
             ),
         };
-        self.font_header = Some(format!("当前字体 · {current}"));
+        self.label(top, format!("当前字体 · {current}"), true);
+        self.label(
+            top + 24.0,
+            "搜索本地字体（Ctrl+F），支持中文和英文名称",
+            false,
+        );
         self.button(
             Rect {
                 x: 24.0,
-                y: TOP + 48.0,
+                y: top + 48.0,
                 w: self.width - 48.0,
                 h: 32.0,
             },
@@ -767,12 +523,21 @@ impl Layout {
             Action::FontSearch,
             false,
             false,
+            true,
+        );
+        self.label(
+            top + 84.0,
+            format!(
+                "匹配 {} / {} 款字体 · 点击或按 Enter 应用",
+                state.font_matches.len(),
+                state.font_names.len()
+            ),
             false,
         );
         self.button(
             Rect {
                 x: 24.0,
-                y: 0.0,
+                y: top + 112.0,
                 w: self.width - 48.0,
                 h: 32.0,
             },
@@ -782,7 +547,7 @@ impl Layout {
             false,
             true,
         );
-        let mut y = 42.0;
+        let mut y = top + 154.0;
         for &index in &state.font_matches {
             let font = &state.font_names[index];
             self.button(
@@ -819,13 +584,20 @@ impl Layout {
         visible.then_some(rect)
     }
 
-    fn channels(&mut self, app: &App) {
+    fn providers(&mut self, app: &App) {
         self.label(
             0.0,
-            format!("渠道过滤 · 已隐藏 {} 项", app.config.hidden_channels.len()),
+            format!(
+                "供应商过滤 · 已隐藏 {} 项",
+                app.config.hidden_providers.len()
+            ),
             true,
         );
-        self.label(26.0, "选中后隐藏该账号的渠道请求，避免转发重复显示", false);
+        self.label(
+            26.0,
+            "选中后隐藏该连接下此供应商的请求；按连接分别记录",
+            false,
+        );
         self.button(
             Rect {
                 x: 24.0,
@@ -833,15 +605,15 @@ impl Layout {
                 w: 144.0,
                 h: 30.0,
             },
-            "清除渠道过滤",
-            Action::ClearChannels,
+            "清除供应商过滤",
+            Action::ClearProviders,
             false,
             false,
             true,
         );
-        let filters = app.channel_filters();
+        let filters = app.provider_filters();
         if filters.is_empty() {
-            self.label(112.0, "暂无可过滤渠道，连接账号并刷新请求后会显示", false);
+            self.label(112.0, "暂无可过滤供应商，连接网关并刷新请求后会显示", false);
         }
         let mut y = 108.0;
         for entry in filters {
@@ -850,7 +622,9 @@ impl Layout {
                 .account(&entry.account_id)
                 .map(|a| a.name.as_str())
                 .unwrap_or(&entry.account_id);
-            let hidden = app.config.hides_channel(&entry.account_id, &entry.channel);
+            let hidden = app
+                .config
+                .hides_provider(&entry.account_id, &entry.provider);
             self.button(
                 Rect {
                     x: 24.0,
@@ -861,9 +635,9 @@ impl Layout {
                 format!(
                     "{}  {name} · {}",
                     if hidden { "☑" } else { "☐" },
-                    entry.channel
+                    entry.provider
                 ),
-                Action::Channel(entry),
+                Action::Provider(entry),
                 hidden,
                 false,
                 true,
@@ -873,33 +647,57 @@ impl Layout {
         self.content_height = (y + 16.0).max(160.0);
     }
 
-    /// The "名称映射" tab keeps its model-name form and adds a second form for
-    /// channel-key labels. Both share the native-box pipeline.
-    fn models(&mut self, app: &App, state: &State) {
-        if state.mapping_keys {
-            self.key_aliases(app, state);
-        } else {
-            self.model_aliases(app);
-        }
-    }
-
-    /// The model-name abbreviation form: a two-box form plus the saved list.
-    /// The boxes are native edit controls placed by `sync_edit_boxes`, the
-    /// same way the font-size and opacity fields work.
-    fn model_aliases(&mut self, app: &App) {
-        let aliases = &app.config.model_aliases;
-        self.label(0.0, format!("模型名映射 · 当前 {} 条", aliases.len()), true);
+    /// The display-name mapping tab: one form, three name kinds (model,
+    /// provider, caller). The form boxes are native edit controls placed by
+    /// `sync_edit_boxes`, the same way the opacity field works.
+    fn mappings(&mut self, app: &App, state: &State) {
+        self.label(
+            0.0,
+            format!(
+                "名称映射 · 模型 {} · 供应商 {} · 发起方 {}",
+                app.config.model_aliases.len(),
+                app.config.provider_aliases.len(),
+                app.config.agent_aliases.len()
+            ),
+            true,
+        );
         self.label(
             26.0,
-            "模型名中的匹配(不区分大小写)逐条全部替换，如 deepseek → ds、flash → f",
+            "匹配不区分大小写，逐条全部替换；简写留空即删除匹配",
             false,
         );
+        // Kind selector; each button carries its own count so the empty lists
+        // are visible without switching.
+        let gap = 8.0;
+        let w = (self.width - 48.0 - gap * 2.0) / 3.0;
+        for (index, kind) in AliasKind::ALL.into_iter().enumerate() {
+            self.button(
+                Rect {
+                    x: 24.0 + index as f32 * (w + gap),
+                    y: 56.0,
+                    w,
+                    h: 30.0,
+                },
+                format!("{} · {}", kind.label(), app.config.aliases(kind).len()),
+                Action::AliasKind(kind),
+                state.alias_kind == kind,
+                false,
+                true,
+            );
+        }
+        let kind = state.alias_kind;
+        let hint = match kind {
+            AliasKind::Model => "作用于请求模型、实际模型和声明模型，如 deepseek → ds、flash → f",
+            AliasKind::Provider => "作用于表格与详情里的供应商名，如 Anthropic → A社",
+            AliasKind::Agent => "作用于表格与详情里的发起方（应用）名，如 Claude Code → CC",
+        };
+        self.label(94.0, hint, false);
         // The two native edit cells; the controls only carry geometry so
         // painting and Tab order agree.
         self.controls.push(Control {
             rect: Rect {
                 x: 24.0,
-                y: 62.0,
+                y: 122.0,
                 w: 170.0,
                 h: 30.0,
             },
@@ -913,7 +711,7 @@ impl Layout {
         self.controls.push(Control {
             rect: Rect {
                 x: 202.0,
-                y: 62.0,
+                y: 122.0,
                 w: 130.0,
                 h: 30.0,
             },
@@ -927,7 +725,7 @@ impl Layout {
         self.button(
             Rect {
                 x: self.width - 114.0,
-                y: 62.0,
+                y: 122.0,
                 w: 90.0,
                 h: 30.0,
             },
@@ -937,9 +735,17 @@ impl Layout {
             false,
             true,
         );
-        let mut y = 108.0;
+        let aliases = app.config.aliases(kind);
+        let mut y = 168.0;
         if aliases.is_empty() {
-            self.label(y, "暂无映射，输入后点「添加」；重复添加会更新简写", false);
+            self.label(
+                y,
+                format!(
+                    "暂无{}映射；输入后点「添加」，重复添加会更新简写",
+                    kind.label()
+                ),
+                false,
+            );
             y += 38.0;
         }
         for (index, alias) in aliases.iter().enumerate() {
@@ -960,7 +766,7 @@ impl Layout {
                     h: 28.0,
                 },
                 "删除",
-                Action::RemoveAlias(index),
+                Action::RemoveAlias(kind, index),
                 false,
                 true,
                 true,
@@ -968,187 +774,6 @@ impl Layout {
             y += 38.0;
         }
         self.content_height = (y + 12.0).max(160.0);
-    }
-
-    /// The channel-key form: pick an account/channel, then bind a credential
-    /// index to a display alias. Targets include channels from fetched rows
-    /// and targets that already have aliases, so old mappings stay editable.
-    fn key_aliases(&mut self, app: &App, state: &State) {
-        let aliases = &app.config.channel_key_aliases;
-        self.label(
-            0.0,
-            format!("Key 别名映射 · 当前 {} 条", aliases.len()),
-            true,
-        );
-        self.label(
-            26.0,
-            "按账号 + 渠道 + Key 索引显示别名，如 A / index2 → my-k2",
-            false,
-        );
-        let mut targets = key_targets(app);
-        // No fallback here: the selection is frozen when the subpage opens.
-        // Re-deriving it from the first target would let a poll move it while
-        // the user is typing an index and alias.
-        let selected = state.key_alias_target.clone();
-        // A poll can drop the channel the user picked before they apply the
-        // alias. Keep showing that explicit target instead of silently
-        // switching to a different first row.
-        if let Some(target) = &selected
-            && !targets.contains(target)
-        {
-            targets.push(target.clone());
-            targets.sort_by(|a, b| (&a.account_id, &a.channel).cmp(&(&b.account_id, &b.channel)));
-        }
-        let mut y = 62.0;
-        if targets.is_empty() {
-            self.label(
-                y,
-                "暂无可映射渠道，先连接账号并刷新请求；有请求后这里会出现目标",
-                false,
-            );
-            y += 34.0;
-        } else {
-            self.label(y, "目标账号与渠道", true);
-            y += 28.0;
-            for entry in &targets {
-                let name = app
-                    .config
-                    .account(&entry.account_id)
-                    .map(|a| a.name.as_str())
-                    .unwrap_or(&entry.account_id);
-                let is_selected = selected.as_ref() == Some(entry);
-                self.button(
-                    Rect {
-                        x: 24.0,
-                        y,
-                        w: self.width - 48.0,
-                        h: 34.0,
-                    },
-                    format!(
-                        "{}  {name} · {}",
-                        if is_selected { "●" } else { "○" },
-                        entry.channel
-                    ),
-                    Action::KeyTarget(entry.clone()),
-                    is_selected,
-                    false,
-                    true,
-                );
-                y += 40.0;
-            }
-            y += 6.0;
-        }
-        self.label(y, "Key 索引与别名", true);
-        y += 26.0;
-        // Native edit cells; the controls only carry geometry and Tab order.
-        self.controls.push(Control {
-            rect: Rect {
-                x: 24.0,
-                y,
-                w: 90.0,
-                h: 30.0,
-            },
-            label: String::new(),
-            action: Action::KeyIndexInput,
-            selected: false,
-            danger: false,
-            body: true,
-            check: false,
-        });
-        let alias_x = 120.0;
-        let button_x = self.width - 144.0;
-        self.controls.push(Control {
-            rect: Rect {
-                x: alias_x,
-                y,
-                w: (button_x - 6.0 - alias_x).max(80.0),
-                h: 30.0,
-            },
-            label: String::new(),
-            action: Action::KeyAliasInput,
-            selected: false,
-            danger: false,
-            body: true,
-            check: false,
-        });
-        self.button(
-            Rect {
-                x: button_x,
-                y,
-                w: 120.0,
-                h: 30.0,
-            },
-            "添加 / 更新",
-            Action::AddKeyAlias,
-            false,
-            false,
-            true,
-        );
-        y += 38.0;
-        if let Some(error) = &state.key_alias_error {
-            self.label_colored(y, error, false, Some(theme::RED));
-        } else {
-            self.label(
-                y,
-                "索引填卡片上「Key #」后的数字（AxonHub 从 1 开始）；小数、负数或空别名不会被接受",
-                false,
-            );
-        }
-        y += 28.0;
-        self.label(y, format!("已有映射 · {} 条", aliases.len()), true);
-        y += 28.0;
-        if aliases.is_empty() {
-            self.label(y, "暂无 Key 映射；填好后点「添加 / 更新」", false);
-            y += 34.0;
-        }
-        for (index, alias) in aliases.iter().enumerate() {
-            let name = app
-                .config
-                .account(&alias.account_id)
-                .map(|a| a.name.as_str())
-                .unwrap_or(&alias.account_id);
-            // The alias is display-only; the index still matches the wire
-            // credential, so a mapping does not shorten the raw model id.
-            self.label(
-                y + 6.0,
-                format!(
-                    "{name} · {} · Key #{} → {}",
-                    alias.channel, alias.key_index, alias.alias
-                ),
-                false,
-            );
-            if let Some(label) = self.labels.last_mut() {
-                label.rect.w -= 180.0;
-            }
-            self.button(
-                Rect {
-                    x: self.width - 174.0,
-                    y,
-                    w: 70.0,
-                    h: 28.0,
-                },
-                "编辑",
-                Action::EditKeyAlias(index),
-                false,
-                false,
-                true,
-            );
-            self.button(
-                Rect {
-                    x: self.width - 94.0,
-                    y,
-                    w: 70.0,
-                    h: 28.0,
-                },
-                "删除",
-                Action::RemoveKeyAlias(index),
-                false,
-                true,
-                true,
-            );
-            y += 36.0;
-        }
-        self.content_height = (y + 12.0).max(180.0);
     }
 
     pub fn view_height(&self) -> f32 {
@@ -1200,13 +825,23 @@ impl Layout {
             None if backwards => controls.len() - 1,
             None => 0,
         };
-        let c = controls[next];
-        state.focus = Some(c.action.clone());
-        if c.body {
+        self.focus_action(state, controls[next].action.clone());
+    }
+
+    pub fn focus_action(&self, state: &mut State, action: Action) {
+        let Some(control) = self
+            .controls
+            .iter()
+            .find(|c| c.action == action && self.available(state, c))
+        else {
+            return;
+        };
+        state.focus = Some(action);
+        if control.body {
             state.scroll = state
                 .scroll
-                .min(c.rect.y)
-                .max(c.rect.y + c.rect.h - self.view_height())
+                .min(control.rect.y)
+                .max(control.rect.y + control.rect.h - self.view_height())
                 .clamp(0.0, self.max_scroll());
         }
     }
@@ -1228,13 +863,7 @@ impl Layout {
             Some(i) => (i + 1).min(fonts.len() - 1),
             None => usize::from(fonts.len() > 1),
         };
-        let control = fonts[index];
-        state.focus = Some(control.action.clone());
-        state.scroll = state
-            .scroll
-            .min(control.rect.y)
-            .max(control.rect.y + control.rect.h - self.view_height())
-            .clamp(0.0, self.max_scroll());
+        self.focus_action(state, fonts[index].action.clone());
     }
 
     pub fn draw(&self, p: &Painter, fonts: &Fonts, state: &State, scale: f32) {
@@ -1282,54 +911,11 @@ impl Layout {
                 w: self.width - 48.0,
                 h: 20.0,
             },
-            "AxonHub · 调整显示、管理账号与请求过滤",
+            "Magpie · 调整显示、管理连接与请求过滤",
             false,
             theme::TEXT_DIM,
             theme::ALIGN_NEAR,
         );
-        if let Some(header) = &self.font_header {
-            text(
-                Rect {
-                    x: 24.0,
-                    y: TOP,
-                    w: self.width - 48.0,
-                    h: 24.0,
-                },
-                header,
-                true,
-                theme::TEXT,
-                theme::ALIGN_NEAR,
-            );
-            text(
-                Rect {
-                    x: 24.0,
-                    y: TOP + 24.0,
-                    w: self.width - 48.0,
-                    h: 20.0,
-                },
-                "搜索本地字体（Ctrl+F），支持中文和英文名称",
-                false,
-                theme::TEXT_DIM,
-                theme::ALIGN_NEAR,
-            );
-            let count = format!(
-                "匹配 {} / {} 款字体 · 点击或按 Enter 应用",
-                state.font_matches.len(),
-                state.font_names.len()
-            );
-            text(
-                Rect {
-                    x: 24.0,
-                    y: TOP + 84.0,
-                    w: self.width - 48.0,
-                    h: 24.0,
-                },
-                &count,
-                false,
-                theme::TEXT_DIM,
-                theme::ALIGN_NEAR,
-            );
-        }
         p.clip(theme::RectF {
             X: 0.0,
             Y: self.content_top * scale,
@@ -1361,12 +947,9 @@ impl Layout {
                 if matches!(
                     c.action,
                     Action::FontSearch
-                        | Action::FontSizeInput
                         | Action::OpacityInput
                         | Action::AliasFromInput
                         | Action::AliasToInput
-                        | Action::KeyIndexInput
-                        | Action::KeyAliasInput
                 ) {
                     continue;
                 }
@@ -1379,7 +962,7 @@ impl Layout {
                 let focused = enabled && state.focus.as_ref() == Some(&c.action);
                 // A checkbox row keeps the card surface: its state is already
                 // legible from the ☑/☐ prefix, so a selected fill would only
-                // add noise to a list of thirteen.
+                // add noise to a list of eighteen.
                 let fill = if !c.check && c.selected {
                     theme::TAB_ON
                 } else if hover {
@@ -1453,8 +1036,8 @@ impl Layout {
             theme::BORDER,
         );
         let hint = match state.pending {
-            Some(Action::RemoveAccount(_)) => "确认删除该账号及其本机凭据？此操作无法撤销。",
-            Some(Action::ClearCredentials) => "确认清除所有账号的凭据？之后需要重新登录。",
+            Some(Action::RemoveAccount(_)) => "确认删除该连接及其本机密钥？此操作无法撤销。",
+            Some(Action::ClearKeys) => "确认清除所有连接的网关密钥？远程网关将无法连接。",
             _ => "设置即时生效并自动保存 · 失焦或 Esc 关闭",
         };
         text(

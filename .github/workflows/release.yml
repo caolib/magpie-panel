@@ -50,6 +50,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "${GITHUB_REF_NAME}" \
-            target/release/ah-panel.exe \
+            target/release/magpie-panel.exe \
             --title "${GITHUB_REF_NAME}" \
             --generate-notes

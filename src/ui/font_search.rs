@@ -1,4 +1,4 @@
-//! Native edit controls for the search and font-size fields: IME, selection
+//! Native edit controls for search, opacity and name mappings: IME, selection
 //! and clipboard stay native.
 
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, WPARAM};
@@ -16,32 +16,32 @@ use windows::core::{PCWSTR, w};
 use crate::theme;
 
 pub const ID: usize = 2100;
-/// The font-size box. A control id of its own keeps its notifications from
-/// being read as search input.
-pub const SIZE_ID: usize = 2101;
 /// The opacity box. A control id of its own keeps its notifications from
 /// being read as search input.
 pub const OPACITY_ID: usize = 2102;
 /// The model-alias form: the prefix to match, then its short form. Both are
-/// free text, so they must not be read as the numeric boxes above.
+/// free text, so they must not be read as the numeric box above.
 pub const ALIAS_FROM_ID: usize = 2103;
 pub const ALIAS_TO_ID: usize = 2104;
 /// The channel-key form: the credential index, then its display alias. The
 /// index is an integer, so a pasted `2.5` is still rejected when it is applied.
 pub const KEY_INDEX_ID: usize = 2105;
-pub const KEY_ALIAS_ID: usize = 2106;
 pub const WM_SEARCH_FOCUS: u32 = WM_APP + 42;
 const EM_LIMITTEXT: u32 = 0x00C5;
 const EM_SETSEL: u32 = 0x00B1;
 
-/// The only boxes that restrict typing to digits; every other id is free text.
+/// Only opacity restricts typing to digits and a decimal point.
 fn numeric_id(id: usize) -> bool {
-    matches!(id, SIZE_ID | OPACITY_ID)
+    id == OPACITY_ID
 }
 
-/// Unlike the decimal boxes above, a key index has no fractional part.
+/// Unlike the decimal box above, a key index has no fractional part.
 fn integer_id(id: usize) -> bool {
     id == KEY_INDEX_ID
+}
+
+fn font_navigation_key(id: usize, key: u16) -> bool {
+    id == ID && [VK_DOWN.0, VK_UP.0].contains(&key)
 }
 
 pub struct SearchBox {
@@ -72,9 +72,9 @@ pub fn font(scale: f32) -> HFONT {
 }
 
 impl SearchBox {
-    /// `id` selects the control: `SIZE_ID`/`OPACITY_ID` restrict typed
-    /// characters to digits and a decimal point, the rest are free text. Text
-    /// set programmatically (or pasted) is taken as-is.
+    /// `id` selects the control: `OPACITY_ID` restricts typed characters to
+    /// digits and a decimal point, the others keep their existing input rules.
+    /// Text set programmatically (or pasted) is taken as-is.
     pub fn new(parent: HWND, scale: f32, text: &str, id: usize) -> Option<Self> {
         let numeric = numeric_id(id);
         let text: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
@@ -195,7 +195,8 @@ unsafe extern "system" fn edit_proc(
                 }
                 return LRESULT(0);
             }
-            if [VK_TAB.0, VK_ESCAPE.0, VK_RETURN.0, VK_DOWN.0, VK_UP.0].contains(&key)
+            if [VK_TAB.0, VK_ESCAPE.0, VK_RETURN.0].contains(&key)
+                || font_navigation_key(id, key)
                 || (key == VK_F.0 && crate::ctrl_down())
             {
                 unsafe {
@@ -216,3 +217,7 @@ unsafe extern "system" fn edit_proc(
     }
     unsafe { DefSubclassProc(hwnd, msg, wp, lp) }
 }
+
+#[cfg(test)]
+#[path = "../tests/ui/font_search.rs"]
+mod tests;

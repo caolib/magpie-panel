@@ -1,26 +1,19 @@
-//! Request card rendering.
+//! Panel chrome and the table half of the list.
 //!
-//! Mirrors the AxonHub requests page information hierarchy — identity/status,
-//! model and routing, then channel, tokens, cache, latency and cost — but laid
-//! out as cards rather than a table so it reads well at panel width. Everything
-//! the console puts behind a tooltip is shown inline: the panel has room
-//! because it is not trying to be a dense, sortable, filterable grid.
-
-use windows::Win32::Graphics::GdiPlus::RectF;
+//! The panel has one layout: a table with one row per request. This module
+//! draws the header (filter chips, query box, settings button) and owns the
+//! hit-test geometry shared by painting and input; `ui::table` draws the rows.
 
 use crate::config::{Account, DisplayField};
-use crate::format as fmt;
 use crate::model::{self, Filter, FilterMask, Row};
 use crate::theme::{self, Painter};
-use crate::ui::layout::{LayoutMode, Metrics, Rect};
+use crate::ui::layout::{Metrics, Rect};
 use crate::ui::table;
 
-/// Colours that mark which account a card came from, chosen by position in the
-/// account list so an account keeps its colour across repaints. Deliberately
-/// none of the status colours, which carry meaning of their own.
+/// Colours that mark which connection a row came from.
 const ACCOUNT_COLORS: [u32; 4] = [theme::MAUVE, theme::ORANGE, theme::CYAN, 0xFFB0_B8C4];
 
-/// The colour of one account's tag.
+/// The colour of one connection's tag.
 pub(crate) fn account_color(accounts: &[Account], id: &str) -> u32 {
     accounts
         .iter()
@@ -30,53 +23,40 @@ pub(crate) fn account_color(accounts: &[Account], id: &str) -> u32 {
 }
 
 /// Authored at 96 DPI; multiplied by `Metrics::scale` at draw time.
-const INNER_PAD: f32 = 7.0;
-const LINE1_H: f32 = 17.0;
-const LINE2_H: f32 = 14.0;
-const CARD_RADIUS: f32 = 5.0;
-const ACCENT_W: f32 = 4.0;
-const ACCENT_INSET: f32 = 5.0;
-/// Header filter chips. The width is fixed (one character plus padding), so
-/// click hit-testing needs no font measurement.
+/// Header filter chips: one character plus padding.
 const FILTER_W: f32 = 24.0;
 const FILTER_H: f32 = 20.0;
 const FILTER_GAP: f32 = 4.0;
 /// The settings button, one chip wide so the header reads as one row.
 const SETTINGS_W: f32 = 24.0;
 const SETTINGS_H: f32 = 20.0;
-/// Header id field, sitting just left of the settings button. A full GUID is
-/// wider than this, so the draw keeps the end of the text in view.
-const ID_BOX_W: f32 = 120.0;
-const ID_BOX_H: f32 = 20.0;
+/// Header query box, sitting just left of the settings button.
+const QUERY_BOX_W: f32 = 150.0;
+const QUERY_BOX_H: f32 = 20.0;
 /// Chip order on the header, left to right.
-const FILTERS: [Filter; 6] = [
+const FILTERS: [Filter; 5] = [
     Filter::All,
     Filter::Completed,
     Filter::Failed,
-    Filter::Active,
-    Filter::Pending,
-    Filter::Canceled,
+    Filter::Live,
+    Filter::Retried,
 ];
 
-/// Colour palette for channel and model names, shared by both so the two kinds
-/// of label are drawn from the same set of colours. The first entry is the
-/// default light blue; later entries distinguish other names on the page.
+/// Colour palette for provider and model names.
 const NAME_PALETTE: [u32; 9] = [
-    theme::CYAN,   // 0: light blue (default)
-    theme::ORANGE, // 1: orange
-    0xFFFF_6BC4,   // 2: hot pink
-    0xFF4F_E0C0,   // 3: turquoise
-    0xFFB9_8CFF,   // 4: purple
-    0xFFFF_B454,   // 5: amber
-    0xFF8D_E85B,   // 6: lime
-    0xFFE0_6BFF,   // 7: magenta
-    0xFFFF_6B6B,   // 8: coral
+    theme::CYAN,
+    theme::ORANGE,
+    0xFFFF_6BC4,
+    0xFF4F_E0C0,
+    0xFFB9_8CFF,
+    0xFFFF_B454,
+    0xFF8D_E85B,
+    0xFFE0_6BFF,
+    0xFFFF_6B6B,
 ];
 
 /// Hand the palette out to `names`, which are listed newest first, so the
-/// assignment runs the other way: the oldest name on the page keeps the default
-/// light blue. New rows arrive at the top, and a name already on the page keeps
-/// its colour when one appears above it.
+/// oldest name on the page keeps the default light blue.
 fn rank_palette(names: &mut [(&str, u32)]) {
     let count = names.len();
     for (i, (_, color)) in names.iter_mut().enumerate() {
@@ -84,14 +64,14 @@ fn rank_palette(names: &mut [(&str, u32)]) {
     }
 }
 
-/// Map each distinct channel in `rows` (newest first) to a palette colour.
-pub(crate) fn channel_palette(rows: &[Row]) -> Vec<(&str, u32)> {
+/// Map each distinct provider in `rows` (newest first) to a palette colour.
+pub(crate) fn provider_palette(rows: &[Row]) -> Vec<(&str, u32)> {
     let mut map: Vec<(&str, u32)> = Vec::new();
     for row in rows {
-        if let Some(ch) = &row.channel {
-            if !map.iter().any(|(n, _)| *n == ch.as_str()) {
-                map.push((ch.as_str(), 0));
-            }
+        if let Some(provider) = row.provider.as_deref()
+            && !map.iter().any(|(n, _)| *n == provider)
+        {
+            map.push((provider, 0));
         }
     }
     rank_palette(&mut map);
@@ -111,56 +91,6 @@ pub(crate) fn model_palette(rows: &[Row]) -> Vec<(&str, u32)> {
     map
 }
 
-/// The card's internal measurements for one draw, already scaled to the monitor.
-#[derive(Clone, Copy)]
-struct CardMetrics {
-    inner_pad: f32,
-    line1: f32,
-    line2: f32,
-    radius: f32,
-    accent_w: f32,
-    accent_inset: f32,
-    /// The gap between the two text lines (two-line layout only).
-    gap: f32,
-    /// Horizontal padding inside the model chip.
-    chip_hpad: f32,
-    /// Vertical padding of the model chip around its text line.
-    chip_vpad: f32,
-    /// Single-line layout: one content line with the chip defining its height.
-    single: bool,
-}
-
-impl CardMetrics {
-    fn new(m: Metrics) -> Self {
-        let s = m.scale;
-        let single = m.mode == LayoutMode::SingleLine;
-        CardMetrics {
-            inner_pad: INNER_PAD * s,
-            line1: LINE1_H * s,
-            line2: LINE2_H * s,
-            radius: CARD_RADIUS * s,
-            accent_w: ACCENT_W * s,
-            // A single-line card gives the accent bar less inset, or the bar
-            // would be shorter than the text it flanks.
-            accent_inset: (if single { 4.0 } else { ACCENT_INSET }) * s,
-            gap: 3.0 * s,
-            chip_hpad: 4.0 * s,
-            chip_vpad: 2.0 * s,
-            single,
-        }
-    }
-
-    /// Total height of the model chip.
-    fn chip_h(&self) -> f32 {
-        self.line2 + self.chip_vpad * 2.0
-    }
-
-    /// The vertical band a card's content must fit into.
-    fn band_h(&self, card_h: f32) -> f32 {
-        card_h - self.accent_inset * 2.0
-    }
-}
-
 /// Everything the list needs besides the rows themselves.
 pub struct ListView<'a> {
     pub rows: &'a [Row],
@@ -170,57 +100,46 @@ pub struct ListView<'a> {
     pub hover: Option<usize>,
     pub selected: Option<usize>,
     pub status_text: Option<(String, bool)>,
-    /// Saved accounts; more than one means every card is tagged with its own.
+    /// Saved connections; more than one means every row is tagged with its own.
     pub accounts: &'a [Account],
-    /// An account did not answer the last poll — the server is unreachable or
-    /// its token was rejected: the settings button turns red, since that is
-    /// where accounts are managed and fixed.
+    /// A connection did not answer the last poll: the settings button turns red.
     pub settings_alert: bool,
     pub pinned: bool,
     /// Selected status-filter bits; the header chips highlight against this.
     pub filter: FilterMask,
-    /// Card cells the user switched off; everything else is drawn.
+    /// Table columns the user switched off.
     pub hidden_fields: &'a [DisplayField],
-    /// The request GUID the list was narrowed to, if the header box was submitted.
-    pub id_query: Option<&'a str>,
-    /// Digits typed into the header box.
-    pub id_draft: &'a str,
+    /// The text the list was narrowed to, if the header box was submitted.
+    pub query: Option<&'a str>,
+    /// What is typed into the header box.
+    pub query_draft: &'a str,
     /// The header box holds the keyboard, so it draws a caret.
-    pub id_editing: bool,
-    pub id_caret: bool,
+    pub query_editing: bool,
+    pub query_caret: bool,
 }
 
 impl ListView<'_> {
-    /// Whether one card cell should be drawn.
+    /// Whether one column should be drawn.
     pub fn shows(&self, field: DisplayField) -> bool {
         !self.hidden_fields.contains(&field)
     }
 }
 
 /// Draw one frame. Returns the client width the table wants when that differs
-/// from the one the window has, so the caller can resize; card layouts and the
-/// empty list ask for nothing.
+/// from the one the window has, so the caller can resize.
 pub fn draw(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) -> Option<f32> {
     p.fill_rect(0.0, 0.0, m.width, m.height, theme::BG);
     draw_header(p, fonts, m, v);
-    let wanted = if m.mode == LayoutMode::Table {
-        table::draw(p, fonts, m, v).map(|w| w.max(header_min_width(m)))
-    } else {
-        draw_rows(p, fonts, m, v);
-        None
-    };
+    let wanted = table::draw(p, fonts, m, v).map(|w| w.max(header_min_width(m)));
     draw_edge(p, m);
     wanted
 }
 
-/// Width the header's controls need so nothing overlaps: the filter chips run
-/// from the left edge, and the id field, the settings button and the padding
-/// follow them. Below it the subtitle is squeezed out; below *this* the chips
-/// would sit on top of the id field, so the table never asks for less.
+/// Width the header's controls need so nothing overlaps.
 pub fn header_min_width(m: Metrics) -> f32 {
     let s = m.scale;
     let chips = FILTERS.len() as f32 * FILTER_W + (FILTERS.len() - 1) as f32 * FILTER_GAP;
-    (2.0 + chips + 8.0 + ID_BOX_W + 6.0 + SETTINGS_W) * s + m.pad() * 2.0
+    (2.0 + chips + 8.0 + QUERY_BOX_W + 6.0 + SETTINGS_W) * s + m.pad() * 2.0
 }
 
 /// One-pixel outline so the panel separates from whatever is behind it.
@@ -242,8 +161,7 @@ pub fn settings_button(m: Metrics) -> Rect {
     }
 }
 
-/// The tail of `text` that fits in `width`. Typing grows to the right, so the
-/// caret stays at the end of the visible part.
+/// The tail of `text` that fits in `width`.
 fn fitting_tail<'a>(p: &Painter, font: &theme::DualFont, text: &'a str, width: f32) -> &'a str {
     if p.dual_measure(font, text) <= width {
         return text;
@@ -259,15 +177,15 @@ fn fitting_tail<'a>(p: &Painter, font: &theme::DualFont, text: &'a str, width: f
     &text[start..]
 }
 
-/// The header's id field, immediately left of the settings button.
-pub fn id_box_rect(m: Metrics) -> Rect {
+/// The header's query box, immediately left of the settings button.
+pub fn query_box_rect(m: Metrics) -> Rect {
     let settings = settings_button(m);
     let s = m.scale;
     Rect {
-        x: settings.x - 6.0 * s - ID_BOX_W * s,
-        y: (m.header_h - ID_BOX_H * s) / 2.0,
-        w: ID_BOX_W * s,
-        h: ID_BOX_H * s,
+        x: settings.x - 6.0 * s - QUERY_BOX_W * s,
+        y: (m.header_h - QUERY_BOX_H * s) / 2.0,
+        w: QUERY_BOX_W * s,
+        h: QUERY_BOX_H * s,
     }
 }
 
@@ -276,8 +194,6 @@ fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
     let y = 6.0 * s;
 
     let settings = settings_button(m);
-    // A red pill is the panel's only hint that an account needs attention, so
-    // it stays red until the account answers a poll again.
     let (settings_fill, settings_text) = if v.settings_alert {
         (theme::with_alpha(theme::RED, 0x38), theme::RED)
     } else {
@@ -302,42 +218,41 @@ fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
         settings_text,
         theme::ALIGN_CENTER,
     );
-    // Counts stop at the left edge of the id field.
-    let id_box = id_box_rect(m);
+
+    let box_ = query_box_rect(m);
     p.round_rect(
-        id_box.x,
-        id_box.y,
-        id_box.w,
-        id_box.h,
+        box_.x,
+        box_.y,
+        box_.w,
+        box_.h,
         3.0 * s,
         theme::INPUT_BG,
         true,
     );
     p.round_rect(
-        id_box.x,
-        id_box.y,
-        id_box.w,
-        id_box.h,
+        box_.x,
+        box_.y,
+        box_.w,
+        box_.h,
         3.0 * s,
         theme::INPUT_BORDER,
         false,
     );
     let pad = 5.0 * s;
-    let inner_w = (id_box.w - pad * 2.0).max(0.0);
-    let placeholder = v.id_draft.is_empty() && !v.id_editing;
-    // A full model id is wider than the box; keep its tail, where the caret sits.
+    let inner_w = (box_.w - pad * 2.0).max(0.0);
+    let placeholder = v.query_draft.is_empty() && !v.query_editing;
     let visible = if placeholder {
-        "model id"
+        "模型 / 应用"
     } else {
-        fitting_tail(p, &fonts.small, v.id_draft, inner_w)
+        fitting_tail(p, &fonts.small, v.query_draft, inner_w)
     };
     p.dual_text(
         &fonts.small,
         visible,
-        id_box.x + pad,
-        id_box.y,
+        box_.x + pad,
+        box_.y,
         inner_w,
-        id_box.h,
+        box_.h,
         if placeholder {
             theme::TEXT_FAINT
         } else {
@@ -345,14 +260,14 @@ fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
         },
         theme::ALIGN_NEAR,
     );
-    if v.id_editing && v.id_caret {
+    if v.query_editing && v.query_caret {
         let tw = p.dual_measure(&fonts.small, visible).min(inner_w);
-        let cx = id_box.x + pad + tw;
+        let cx = box_.x + pad + tw;
         p.fill_rect(
             cx,
-            id_box.y + 4.0 * s,
+            box_.y + 4.0 * s,
             s.max(1.0),
-            id_box.h - 8.0 * s,
+            box_.h - 8.0 * s,
             theme::TEXT,
         );
     }
@@ -363,22 +278,17 @@ fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
         let ly = y + 4.0 * s;
         let c = theme::TEXT_DIM;
         let bw = 7.0 * s;
-        // Shackle (outlined arc on top).
         p.round_rect(lx + 1.5 * s, ly, 4.0 * s, 5.0 * s, 2.0 * s, c, false);
-        // Body (filled rounded rect).
         p.round_rect(lx, ly + 3.0 * s, bw, 5.0 * s, 1.5 * s, c, true);
         m.pad() + 2.0 + bw + 6.0 * s
     } else {
         m.pad() + 2.0
     };
-    // Filter chips run left-to-right from the header's left edge; the
-    // subtitle follows them. `chip_rect`/`hit_filter` mirror this geometry.
+
     let chip_y = (m.header_h - FILTER_H * s) / 2.0;
     let chip_text_h = 14.0 * s;
     let mut x = sub_x;
     for f in FILTERS {
-        // 全部 is lit when nothing is selected; status chips light when
-        // their own bit is set, so several can be on at once.
         let selected = if f == Filter::All {
             v.filter == model::FILTER_NONE
         } else {
@@ -402,9 +312,8 @@ fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
                 Filter::All => theme::WHITE,
                 Filter::Completed => theme::GREEN,
                 Filter::Failed => theme::RED,
-                Filter::Active => theme::BLUE,
-                Filter::Pending => theme::YELLOW,
-                Filter::Canceled => theme::GRAY,
+                Filter::Live => theme::BLUE,
+                Filter::Retried => theme::YELLOW,
             }
         } else {
             theme::TEXT_DIM
@@ -422,10 +331,8 @@ fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
         x += FILTER_W * s + FILTER_GAP * s;
     }
 
-    // The subtitle stops at the left edge of the id field.
-    let sub_right = id_box.x - 8.0 * s;
+    let sub_right = box_.x - 8.0 * s;
     let sub_w = (sub_right - x).max(0.0);
-
     let (text, color) = match &v.status_text {
         Some((message, true)) => (message.clone(), theme::RED),
         Some((message, false)) => (message.clone(), theme::GREEN),
@@ -445,11 +352,10 @@ fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
     p.fill_rect(0.0, m.header_h - 1.0, m.width, 1.0, theme::SEPARATOR);
 }
 
-/// The placeholder for a list with nothing to show, shared by the card and
-/// table layouts.
+/// The placeholder for a list with nothing to show.
 pub(crate) fn draw_empty(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
-    let label = if v.id_query.is_some() {
-        "未找到该模型"
+    let label = if v.query.is_some() {
+        "未找到匹配记录"
     } else {
         "等待数据…"
     };
@@ -465,970 +371,7 @@ pub(crate) fn draw_empty(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &List
     );
 }
 
-fn draw_rows(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
-    if v.rows.is_empty() {
-        draw_empty(p, fonts, m, v);
-        return;
-    }
-
-    // Clip so cards scroll inside the list area rather than over the chrome.
-    let area = m.rows_area();
-    p.clip(RectF {
-        X: 0.0,
-        Y: area.y,
-        Width: area.w,
-        Height: area.h,
-    });
-
-    let ch_palette = channel_palette(v.rows);
-    let mdl_palette = model_palette(v.rows);
-
-    for index in 0..v.rows.len() {
-        let rect = m.card_rect(index, v.scroll);
-        if rect.y + rect.h < area.y || rect.y > area.y + area.h {
-            continue;
-        }
-        draw_card(
-            p,
-            fonts,
-            &v.rows[index],
-            rect,
-            v,
-            index,
-            m,
-            &ch_palette,
-            &mdl_palette,
-        );
-    }
-    p.reset_clip();
-}
-
-/// Card background and the status accent bar, shared by both card layouts.
-fn draw_card_chrome(
-    p: &Painter,
-    row: &Row,
-    rect: Rect,
-    c: &CardMetrics,
-    m: Metrics,
-    highlighted: bool,
-) {
-    let fill = if highlighted {
-        theme::CARD_HOVER
-    } else {
-        theme::CARD
-    };
-    p.round_rect(rect.x, rect.y, rect.w, rect.h, c.radius, fill, true);
-
-    // Status is encoded by colour alone: this bar is the only state indicator,
-    // so it is wide enough to read at a glance and inset from the card edge.
-    p.round_rect(
-        rect.x + m.scale,
-        rect.y + c.accent_inset,
-        c.accent_w,
-        c.band_h(rect.h),
-        c.accent_w / 2.0,
-        theme::status_color(row.status),
-        true,
-    );
-}
-
-#[allow(clippy::too_many_arguments)]
-fn draw_card(
-    p: &Painter,
-    fonts: &theme::Fonts,
-    row: &Row,
-    rect: Rect,
-    v: &ListView,
-    index: usize,
-    m: Metrics,
-    ch_palette: &[(&str, u32)],
-    mdl_palette: &[(&str, u32)],
-) {
-    let c = CardMetrics::new(m);
-    let highlighted = v.hover == Some(index) || v.selected == Some(index);
-    draw_card_chrome(p, row, rect, &c, m, highlighted);
-
-    if c.single {
-        draw_card_single(p, fonts, row, rect, v, m, &c, ch_palette, mdl_palette);
-        return;
-    }
-
-    let text_x = rect.x + c.inner_pad;
-    let mut y = rect.y + c.accent_inset;
-
-    // --- Line 1: marks, caller, channel + time(right) ---
-    let line1_y = y;
-    let line1_gap = 6.0 * m.scale;
-    let mut x = text_x;
-    let mark_gap = 2.0 * m.scale;
-
-    // 流 (streaming): bright when the client streamed, faint when it did not.
-    if v.shows(DisplayField::Stream) {
-        let w = p.dual_measure(&fonts.body, "流");
-        p.dual_text(
-            &fonts.body,
-            "流",
-            x,
-            line1_y,
-            w,
-            c.line1,
-            if row.stream {
-                theme::WHITE
-            } else {
-                theme::TEXT_FAINT
-            },
-            theme::ALIGN_NEAR,
-        );
-        x += w + mark_gap;
-    }
-
-    // Protocol conversion mark: 转 yellow when conversion happened, green otherwise.
-    if v.shows(DisplayField::Conversion) {
-        let w = p.dual_measure(&fonts.body, "转");
-        p.dual_text(
-            &fonts.body,
-            "转",
-            x,
-            line1_y,
-            w,
-            c.line1,
-            if row.protocol().is_converted() {
-                theme::YELLOW
-            } else {
-                theme::GREEN
-            },
-            theme::ALIGN_NEAR,
-        );
-        x += w + mark_gap;
-    }
-
-    // Pass-through mark: 透 green when applied, gray otherwise.
-    if v.shows(DisplayField::PassThrough) {
-        let w = p.dual_measure(&fonts.body, "透");
-        p.dual_text(
-            &fonts.body,
-            "透",
-            x,
-            line1_y,
-            w,
-            c.line1,
-            if row.pass_through {
-                theme::GREEN
-            } else {
-                theme::GRAY
-            },
-            theme::ALIGN_NEAR,
-        );
-        x += w + line1_gap;
-    }
-
-    // Right-aligned cells are placed first so the left cluster knows what room
-    // is left: the time, then the account tag.
-    let mut cells_limit = rect.x + rect.w - c.inner_pad;
-
-    if v.shows(DisplayField::CreatedAt) {
-        let time_text = fmt::relative_time(row.created_at.as_deref(), v.now);
-        let time_w = p.dual_measure(&fonts.body, &time_text) + 4.0;
-        p.dual_text(
-            &fonts.body,
-            &time_text,
-            cells_limit - time_w,
-            line1_y,
-            time_w,
-            c.line1,
-            theme::TEXT_FAINT,
-            theme::ALIGN_FAR,
-        );
-        cells_limit -= time_w + 4.0 * m.scale;
-    }
-
-    // Account tag, immediately left of the time. Only when there is more than
-    // one account whose requests are merged here — with a single account it
-    // would say nothing.
-    if v.shows(DisplayField::Account) && v.accounts.len() > 1 && !row.account_name.is_empty() {
-        let color = account_color(v.accounts, &row.account_id);
-        let w = p.dual_measure(&fonts.small, &row.account_name);
-        let tag_x = cells_limit - w - 6.0 * m.scale;
-        if tag_x > x {
-            p.dual_text(
-                &fonts.small,
-                &row.account_name,
-                tag_x,
-                line1_y,
-                w + 2.0 * m.scale,
-                c.line1,
-                color,
-                theme::ALIGN_NEAR,
-            );
-            cells_limit = tag_x - 4.0 * m.scale;
-        }
-    }
-
-    // Protocol name (chat/responses/messages): the interface type the client
-    // spoke, placed right after the marks so it sits beside its indicators.
-    if v.shows(DisplayField::Protocol)
-        && let Some(name) = &row.format
-    {
-        let w = p.dual_measure(&fonts.small, name);
-        if x + w < cells_limit {
-            p.dual_text(
-                &fonts.small,
-                name,
-                x,
-                line1_y,
-                w + 2.0 * m.scale,
-                c.line1,
-                theme::TEXT_DIM,
-                theme::ALIGN_NEAR,
-            );
-            x += w + 5.0 * m.scale;
-        }
-    }
-
-    // Caller: the API key name only.
-    if v.shows(DisplayField::Caller)
-        && let Some(caller) = row.caller.as_deref()
-    {
-        let w = p.dual_measure(&fonts.small, caller);
-        if x + w < cells_limit {
-            p.dual_text(
-                &fonts.small,
-                caller,
-                x,
-                line1_y,
-                w + 2.0 * m.scale,
-                c.line1,
-                theme::TEXT_FAINT,
-                theme::ALIGN_NEAR,
-            );
-            x += w + 5.0 * m.scale;
-        }
-    }
-
-    // Channel.
-    if v.shows(DisplayField::Channel)
-        && let Some(channel) = &row.channel
-    {
-        let color = ch_palette
-            .iter()
-            .find(|(n, _)| *n == channel.as_str())
-            .map(|(_, c)| *c)
-            .unwrap_or(theme::CYAN);
-        let w = p.dual_measure(&fonts.small, channel);
-        if x + w < cells_limit {
-            p.dual_text(
-                &fonts.small,
-                channel,
-                x,
-                line1_y,
-                w + 2.0 * m.scale,
-                c.line1,
-                color,
-                theme::ALIGN_NEAR,
-            );
-            x += w + 5.0 * m.scale;
-        }
-    }
-
-    // Channel API key index, exactly as AxonHub reports it.
-    if v.shows(DisplayField::ChannelAPIKeyIndex)
-        && let Some(index) = key_index_text(row)
-    {
-        place_cell(
-            p,
-            fonts,
-            &index,
-            theme::TEXT_FAINT,
-            line1_y,
-            &mut x,
-            cells_limit,
-            c.line1,
-            5.0 * m.scale,
-        );
-    }
-
-    // Tokens.
-    if v.shows(DisplayField::Tokens) && row.total_tokens > 0 {
-        let tokens = fmt::tokens_compact(row.total_tokens);
-        let w = p.dual_measure(&fonts.small, &tokens);
-        if x + w < cells_limit {
-            p.dual_text(
-                &fonts.small,
-                &tokens,
-                x,
-                line1_y,
-                w,
-                c.line1,
-                theme::TEXT_DIM,
-                theme::ALIGN_NEAR,
-            );
-            x += w + 5.0 * m.scale;
-        }
-    }
-
-    draw_source(
-        p,
-        fonts,
-        row,
-        v,
-        line1_y,
-        &mut x,
-        cells_limit,
-        c.line1,
-        5.0 * m.scale,
-    );
-
-    y += c.line1 + c.gap;
-
-    // --- Line 2: model, cache, tokens, TPS, retry ---
-    // Right-aligned items are placed first so the left cluster can be clipped
-    // to whatever space remains.
-    let mut right_edge = rect.x + rect.w - c.inner_pad;
-
-    // TPS (tokens per second).
-    if v.shows(DisplayField::Speed)
-        && let Some(tps) = row.tps()
-    {
-        let label = format!("{tps:.0} tps");
-        let w = p.dual_measure(&fonts.small, &label);
-        p.dual_text(
-            &fonts.small,
-            &label,
-            right_edge - w - 2.0 * m.scale,
-            y,
-            w + 4.0 * m.scale,
-            c.line2,
-            theme::TEXT_DIM,
-            theme::ALIGN_FAR,
-        );
-        right_edge -= w + 10.0 * m.scale;
-    }
-
-    // Retry badge.
-    if v.shows(DisplayField::Retry) && row.attempt_count > 1 {
-        let label = format!("{}×", row.attempt_count - 1);
-        let w = p.dual_measure(&fonts.small, &label) + 6.0;
-        p.dual_text(
-            &fonts.small,
-            &label,
-            right_edge - w,
-            y,
-            w,
-            c.line2,
-            theme::RED,
-            theme::ALIGN_FAR,
-        );
-        right_edge -= w + 10.0 * m.scale;
-    }
-
-    // Left-aligned items: model first, then metrics advancing past each cell.
-    let line2_gap = 6.0 * m.scale;
-    let mut x = text_x;
-
-    // Model name with reasoning effort, e.g. "glm-5.2(max)". Drawn on a soft
-    // chip so the served model stands apart from the surrounding metrics.
-    if v.shows(DisplayField::Model) {
-        let display = row.display_model();
-        let model_color = mdl_palette
-            .iter()
-            .find(|(n, _)| *n == row.served_model())
-            .map(|(_, c)| *c)
-            .unwrap_or(theme::TEXT);
-        let chip_w = (p.dual_measure(&fonts.small, &display) + c.chip_hpad * 2.0)
-            .min((right_edge - x).max(0.0));
-        let text_w = (chip_w - c.chip_hpad * 2.0).max(0.0);
-        p.round_rect(
-            x,
-            y - c.chip_vpad,
-            chip_w,
-            c.chip_h(),
-            3.0 * m.scale,
-            theme::BORDER,
-            true,
-        );
-        p.dual_text(
-            &fonts.small,
-            &display,
-            x + c.chip_hpad,
-            y,
-            text_w,
-            c.line2,
-            model_color,
-            theme::ALIGN_NEAR,
-        );
-        x += chip_w + line2_gap;
-    }
-
-    // Upstream model: the provider's own model name, with the vendor prefix
-    // stripped. It is a separate cell from the model chip because routing can
-    // make the two differ.
-    if v.shows(DisplayField::UpstreamModel)
-        && let Some(upstream) = upstream_model_text(row)
-    {
-        place_cell(
-            p,
-            fonts,
-            &upstream,
-            theme::TEXT_DIM,
-            y,
-            &mut x,
-            right_edge,
-            c.line2,
-            line2_gap,
-        );
-    }
-
-    // Cache hit rate.
-    if v.shows(DisplayField::Cache)
-        && let Some(rate) = row.cache_hit_rate()
-    {
-        let label = format!("{rate:.2}%");
-        let w = p.dual_measure(&fonts.small, &label);
-        if x + w < right_edge {
-            p.dual_text(
-                &fonts.small,
-                &label,
-                x,
-                y,
-                w,
-                c.line2,
-                if row.cache_hit_is_low() {
-                    theme::RED
-                } else {
-                    theme::GREEN
-                },
-                theme::ALIGN_NEAR,
-            );
-        }
-    }
-
-    y += c.line2 + c.gap;
-
-    // --- Line 3: cost, latency, completion. Right side stays empty so a long
-    // latency reading can use the whole card.
-    let line3_limit = rect.x + rect.w - c.inner_pad;
-    let mut x = text_x;
-    let gap = 6.0 * m.scale;
-    draw_usage_line(p, fonts, row, v, y, &mut x, line3_limit, c.line2, gap, true);
-}
-
-/// Compact card: every field on a single line, with the model chip as the only
-/// framed element.
-///
-/// The busiest cards cannot fit at panel width, so the right-hand cluster is
-/// placed first and the left-hand cells are drawn in priority order, each only
-/// if it still fits in what remains. A dropped cell is not an anomaly — it
-/// simply does not fit — which is why the panel degrades this way rather than
-/// shrinking the text.
-#[allow(clippy::too_many_arguments)]
-fn draw_card_single(
-    p: &Painter,
-    fonts: &theme::Fonts,
-    row: &Row,
-    rect: Rect,
-    v: &ListView,
-    m: Metrics,
-    c: &CardMetrics,
-    ch_palette: &[(&str, u32)],
-    mdl_palette: &[(&str, u32)],
-) {
-    let s = m.scale;
-    let gap = 4.0 * s;
-    // The chip defines the content band; every text line is centred against it.
-    let chip_h = c.chip_h();
-    let chip_y = rect.y + (rect.h - chip_h) / 2.0;
-    let small_y = chip_y + c.chip_vpad;
-    let body_y = rect.y + (rect.h - c.line1) / 2.0;
-
-    // --- Right cluster: time, TPS, retry. Placed first so the left cluster
-    // knows exactly how much room it has.
-    let mut right = rect.x + rect.w - c.inner_pad;
-
-    if v.shows(DisplayField::CreatedAt) {
-        let time_text = fmt::relative_time(row.created_at.as_deref(), v.now);
-        let time_w = p.dual_measure(&fonts.body, &time_text) + 4.0;
-        let time_x = right - time_w;
-        p.dual_text(
-            &fonts.body,
-            &time_text,
-            time_x,
-            body_y,
-            time_w,
-            c.line1,
-            theme::TEXT_FAINT,
-            theme::ALIGN_FAR,
-        );
-        right = time_x - 8.0 * s;
-    }
-
-    // Cost, immediately left of the time so the two read as one pair.
-    if v.shows(DisplayField::Cost)
-        && let Some(value) = row.total_cost
-    {
-        let text = fmt::cost(value);
-        let cost_w = p.dual_measure(&fonts.body, &text) + 4.0;
-        let cost_x = right - cost_w;
-        p.dual_text(
-            &fonts.body,
-            &text,
-            cost_x,
-            body_y,
-            cost_w,
-            c.line1,
-            theme::YELLOW,
-            theme::ALIGN_FAR,
-        );
-        right = cost_x - 8.0 * s;
-    }
-
-    // Account tag, left of the cost; only when more than one
-    // account is merged into this list.
-    if v.shows(DisplayField::Account) && v.accounts.len() > 1 && !row.account_name.is_empty() {
-        let color = account_color(v.accounts, &row.account_id);
-        let w = p.dual_measure(&fonts.small, &row.account_name);
-        p.dual_text(
-            &fonts.small,
-            &row.account_name,
-            right - w - 2.0 * s,
-            small_y,
-            w + 4.0 * s,
-            c.line2,
-            color,
-            theme::ALIGN_FAR,
-        );
-        right -= w + 10.0 * s;
-    }
-
-    if v.shows(DisplayField::Speed)
-        && let Some(tps) = row.tps()
-    {
-        let label = format!("{tps:.0} tps");
-        let w = p.dual_measure(&fonts.small, &label);
-        p.dual_text(
-            &fonts.small,
-            &label,
-            right - w - 2.0 * s,
-            small_y,
-            w + 4.0 * s,
-            c.line2,
-            theme::TEXT_DIM,
-            theme::ALIGN_FAR,
-        );
-        right -= w + 10.0 * s;
-    }
-
-    if v.shows(DisplayField::Retry) && row.attempt_count > 1 {
-        let label = format!("{}×", row.attempt_count - 1);
-        let w = p.dual_measure(&fonts.small, &label) + 6.0;
-        p.dual_text(
-            &fonts.small,
-            &label,
-            right - w,
-            small_y,
-            w,
-            c.line2,
-            theme::RED,
-            theme::ALIGN_FAR,
-        );
-        right -= w + 10.0 * s;
-    }
-
-    // Every left-hand cell must stop short of the right cluster.
-    let limit = right - 4.0 * s;
-
-    // --- Left cluster. The status marks (流/转/透) and interface type are
-    // drawn first, at a fixed offset from the card edge, so they never jitter
-    // as the variable-width model name changes between rows. The model chip —
-    // the row's identity — always follows, filling whatever room remains.
-    let mut x = rect.x + c.inner_pad;
-
-    // Status marks. They are drawn as one group so they stay aligned with each
-    // other, but each mark can be switched off in settings; the group is only
-    // dropped whole when it does not fit the room left on the line.
-    let mut marks: Vec<(&str, u32)> = Vec::with_capacity(3);
-    if v.shows(DisplayField::Stream) {
-        marks.push((
-            "流",
-            if row.stream {
-                theme::WHITE
-            } else {
-                theme::TEXT_FAINT
-            },
-        ));
-    }
-    if v.shows(DisplayField::Conversion) {
-        marks.push((
-            "转",
-            if row.protocol().is_converted() {
-                theme::YELLOW
-            } else {
-                theme::GREEN
-            },
-        ));
-    }
-    if v.shows(DisplayField::PassThrough) {
-        marks.push((
-            "透",
-            if row.pass_through {
-                theme::GREEN
-            } else {
-                theme::GRAY
-            },
-        ));
-    }
-    let mark_gap = 1.0 * s;
-    let marks_w: f32 = marks
-        .iter()
-        .map(|(mark, _)| p.dual_measure(&fonts.body, mark) + mark_gap)
-        .sum::<f32>()
-        - mark_gap;
-    if !marks.is_empty() && x + marks_w <= limit {
-        for (mark, color) in &marks {
-            let w = p.dual_measure(&fonts.body, mark);
-            p.dual_text(
-                &fonts.body,
-                mark,
-                x,
-                body_y,
-                w,
-                c.line1,
-                *color,
-                theme::ALIGN_NEAR,
-            );
-            x += w + mark_gap;
-        }
-        x += gap - mark_gap;
-    }
-
-    // Interface type (chat/responses/messages): the protocol the client spoke.
-    // Placed right after the marks, before the model name, so its position is
-    // also fixed rather than trailing a variable-width chip.
-    if v.shows(DisplayField::Protocol)
-        && let Some(name) = &row.format
-    {
-        let w = p.dual_measure(&fonts.small, name);
-        if x + w < limit {
-            p.dual_text(
-                &fonts.small,
-                name,
-                x,
-                small_y,
-                w + 2.0 * s,
-                c.line2,
-                theme::TEXT_DIM,
-                theme::ALIGN_NEAR,
-            );
-            x += w + gap;
-        }
-    }
-
-    // Channel: drawn before the model name so its position is fixed too, right
-    // after the interface type, rather than trailing the variable-width chip.
-    if v.shows(DisplayField::Channel)
-        && let Some(channel) = &row.channel
-    {
-        let color = ch_palette
-            .iter()
-            .find(|(n, _)| *n == channel.as_str())
-            .map(|(_, c)| *c)
-            .unwrap_or(theme::CYAN);
-        let w = p.dual_measure(&fonts.small, channel);
-        if x + w < limit {
-            p.dual_text(
-                &fonts.small,
-                channel,
-                x,
-                small_y,
-                w + 2.0 * s,
-                c.line2,
-                color,
-                theme::ALIGN_NEAR,
-            );
-            x += w + gap;
-        }
-    }
-
-    // Channel API key index, exactly as AxonHub reports it.
-    if v.shows(DisplayField::ChannelAPIKeyIndex)
-        && let Some(index) = key_index_text(row)
-    {
-        place_cell(
-            p,
-            fonts,
-            &index,
-            theme::TEXT_FAINT,
-            small_y,
-            &mut x,
-            limit,
-            c.line2,
-            gap,
-        );
-    }
-
-    // Model chip: the row's identity, drawn last so it is compressed to
-    // whatever room the fixed-width prefix above leaves for it.
-    if v.shows(DisplayField::Model) {
-        let display = row.display_model();
-        let model_color = mdl_palette
-            .iter()
-            .find(|(n, _)| *n == row.served_model())
-            .map(|(_, c)| *c)
-            .unwrap_or(theme::TEXT);
-        let chip_w =
-            (p.dual_measure(&fonts.small, &display) + c.chip_hpad * 2.0).min((limit - x).max(0.0));
-        p.round_rect(x, chip_y, chip_w, chip_h, 3.0 * s, theme::BORDER, true);
-        p.dual_text(
-            &fonts.small,
-            &display,
-            x + c.chip_hpad,
-            small_y,
-            (chip_w - c.chip_hpad * 2.0).max(0.0),
-            c.line2,
-            model_color,
-            theme::ALIGN_NEAR,
-        );
-        x += chip_w + gap;
-    }
-
-    // Upstream model, when it differs from what the chip shows.
-    if v.shows(DisplayField::UpstreamModel)
-        && let Some(upstream) = upstream_model_text(row)
-    {
-        place_cell(
-            p,
-            fonts,
-            &upstream,
-            theme::TEXT_DIM,
-            small_y,
-            &mut x,
-            limit,
-            c.line2,
-            gap,
-        );
-    }
-
-    // Caller: the API key name only.
-    if v.shows(DisplayField::Caller)
-        && let Some(caller) = row.caller.as_deref()
-    {
-        let w = p.dual_measure(&fonts.small, caller);
-        if x + w < limit {
-            p.dual_text(
-                &fonts.small,
-                caller,
-                x,
-                small_y,
-                w + 2.0 * s,
-                c.line2,
-                theme::TEXT_FAINT,
-                theme::ALIGN_NEAR,
-            );
-            x += w + gap;
-        }
-    }
-
-    // Tokens.
-    if v.shows(DisplayField::Tokens) && row.total_tokens > 0 {
-        let tokens = fmt::tokens_compact(row.total_tokens);
-        let w = p.dual_measure(&fonts.small, &tokens);
-        if x + w < limit {
-            p.dual_text(
-                &fonts.small,
-                &tokens,
-                x,
-                small_y,
-                w,
-                c.line2,
-                theme::TEXT_DIM,
-                theme::ALIGN_NEAR,
-            );
-            x += w + gap;
-        }
-    }
-
-    // Cache hit rate.
-    if v.shows(DisplayField::Cache)
-        && let Some(rate) = row.cache_hit_rate()
-    {
-        let label = format!("{rate:.2}%");
-        let w = p.dual_measure(&fonts.small, &label);
-        if x + w < limit {
-            p.dual_text(
-                &fonts.small,
-                &label,
-                x,
-                small_y,
-                w,
-                c.line2,
-                if row.cache_hit_is_low() {
-                    theme::RED
-                } else {
-                    theme::GREEN
-                },
-                theme::ALIGN_NEAR,
-            );
-            x += w + gap;
-        }
-    }
-
-    draw_usage_line(
-        p, fonts, row, v, small_y, &mut x, limit, c.line2, gap, false,
-    );
-    draw_source(p, fonts, row, v, small_y, &mut x, limit, c.line2, gap);
-}
-
-/// The provider's model name with the vendor prefix stripped, matching how the
-/// model chip shortens the requested/served model.
-pub(crate) fn upstream_model_text(row: &Row) -> Option<String> {
-    let model = row.upstream_model.as_deref()?;
-    let model = model::display_model_name(model, &[]);
-    (!model.is_empty()).then_some(model)
-}
-
-/// The configured alias, falling back to the untouched upstream index.
-pub(crate) fn key_index_text(row: &Row) -> Option<String> {
-    row.channel_api_key_index.map(|index| {
-        row.channel_key_label
-            .as_deref()
-            .filter(|label| !label.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("Key #{index}"))
-    })
-}
-
-/// `写 1.5k`: tokens written into the prompt cache, when the request reported
-/// any. Kept beside the other usage readings rather than in its own line.
-pub(crate) fn cache_write_text(row: &Row) -> Option<String> {
-    (row.write_cached_tokens > 0)
-        .then(|| format!("写 {}", fmt::tokens_compact(row.write_cached_tokens)))
-}
-
-/// Latency and completion tokens (plus cost in the multi-line layout), drawn
-/// left to right until the line runs out.
-#[allow(clippy::too_many_arguments)]
-fn draw_usage_line(
-    p: &Painter,
-    fonts: &theme::Fonts,
-    row: &Row,
-    v: &ListView,
-    y: f32,
-    x: &mut f32,
-    limit: f32,
-    line_h: f32,
-    gap: f32,
-    with_cost: bool,
-) {
-    if with_cost
-        && v.shows(DisplayField::Cost)
-        && let Some(value) = row.total_cost
-    {
-        place_cell(
-            p,
-            fonts,
-            &fmt::cost(value),
-            theme::YELLOW,
-            y,
-            x,
-            limit,
-            line_h,
-            gap,
-        );
-    }
-    if v.shows(DisplayField::CostBreakdown)
-        && let Some(label) = row.cost_breakdown_text()
-    {
-        place_cell(p, fonts, &label, theme::YELLOW, y, x, limit, line_h, gap);
-    }
-    if v.shows(DisplayField::CacheWrite)
-        && let Some(label) = cache_write_text(row)
-    {
-        place_cell(p, fonts, &label, theme::TEXT_DIM, y, x, limit, line_h, gap);
-    }
-    if v.shows(DisplayField::Latency)
-        && let Some(label) = fmt::latency(row.latency_ms, row.first_token_ms)
-    {
-        place_cell(p, fonts, &label, theme::TEXT_DIM, y, x, limit, line_h, gap);
-    }
-    if v.shows(DisplayField::Completion) && row.completion_tokens > 0 {
-        let mut label = format!("出 {}", fmt::tokens_compact(row.completion_tokens));
-        if row.reasoning_tokens > 0 {
-            label.push_str(&format!(
-                " 思 {}",
-                fmt::tokens_compact(row.reasoning_tokens)
-            ));
-        }
-        place_cell(p, fonts, &label, theme::TEXT_DIM, y, x, limit, line_h, gap);
-    }
-}
-
-/// `api · ::1`: the entry point and the client address, each shown on its own
-/// when the other is missing.
-#[allow(clippy::too_many_arguments)]
-fn draw_source(
-    p: &Painter,
-    fonts: &theme::Fonts,
-    row: &Row,
-    v: &ListView,
-    y: f32,
-    x: &mut f32,
-    limit: f32,
-    line_h: f32,
-    gap: f32,
-) {
-    if !v.shows(DisplayField::Source) {
-        return;
-    }
-    let label = match (&row.source, &row.client_ip) {
-        (Some(source), Some(ip)) => format!("{source} · {ip}"),
-        (Some(source), None) => source.clone(),
-        (None, Some(ip)) => ip.clone(),
-        (None, None) => return,
-    };
-    place_cell(
-        p,
-        fonts,
-        &label,
-        theme::TEXT_FAINT,
-        y,
-        x,
-        limit,
-        line_h,
-        gap,
-    );
-}
-
-/// Draw `label` at `x` when it still fits before `limit`, then advance `x`.
-#[allow(clippy::too_many_arguments)]
-fn place_cell(
-    p: &Painter,
-    fonts: &theme::Fonts,
-    label: &str,
-    color: u32,
-    y: f32,
-    x: &mut f32,
-    limit: f32,
-    line_h: f32,
-    gap: f32,
-) {
-    let w = p.dual_measure(&fonts.small, label);
-    if *x + w >= limit {
-        return;
-    }
-    p.dual_text(
-        &fonts.small,
-        label,
-        *x,
-        y,
-        w,
-        line_h,
-        color,
-        theme::ALIGN_NEAR,
-    );
-    *x += w + gap;
-}
-
 /// The header chip for `f`, laid out exactly as `draw_header` draws them.
-/// The pinned lock icon sits ahead of the chips, so its width is folded in.
 fn chip_rect(m: Metrics, v: &ListView, f: Filter) -> Rect {
     let s = m.scale;
     let mut x = if v.pinned {
@@ -1473,9 +416,8 @@ pub fn hit_row(m: Metrics, v: &ListView, x: f32, y: f32) -> Option<usize> {
     m.row_at(y, v.scroll, v.rows.len())
 }
 
-/// The card a point is over whose detail can be opened, if any. Those are the
-/// only cards that take a click: everything else stays a drag handle, so a
-/// stray press can never open anything. Pinned mode is display-only.
+/// The row a point is over whose detail can be opened, if any. Only rows with
+/// something to explain take a click; everything else stays a drag handle.
 pub fn hit_error_row(m: Metrics, v: &ListView, x: f32, y: f32) -> Option<usize> {
     if v.pinned {
         return None;
