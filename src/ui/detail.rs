@@ -1,5 +1,6 @@
-//! Error and retry details: four columns, wrapped logs and copyable full text.
-//! The worker adds matched trace attempts or an incomplete ledger summary.
+//! Error and retry details: one record per block, its request fields on the
+//! first line and the wrapped log on full-width lines below. The worker adds
+//! matched trace attempts or an incomplete ledger summary.
 
 use windows::Win32::Graphics::GdiPlus::RectF;
 
@@ -17,7 +18,6 @@ pub const MIN_H: f32 = 220.0;
 
 const PAD: f32 = 10.0;
 const HEADER_H: f32 = 30.0;
-const TABLE_HEADER_H: f32 = 24.0;
 const FOOTER_H: f32 = 32.0;
 const ROW_H: f32 = 17.0;
 const CELL_PAD: f32 = 4.0;
@@ -25,7 +25,9 @@ const COLUMN_GAP: f32 = 8.0;
 const BUTTON_H: f32 = 22.0;
 const CLOSE_W: f32 = 22.0;
 const COPY_W: f32 = 52.0;
-const HEADERS: [&str; 4] = ["状态码", "供应商", "模型", "错误日志"];
+/// A log line longer than this wraps instead of widening the popup.
+pub const MAX_LOG_W: f32 = 480.0;
+const HEADERS: [&str; 5] = ["状态码", "供应商", "模型", "类型", "错误日志"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Button {
@@ -76,30 +78,11 @@ impl Popup {
     }
 
     pub fn content_top(&self) -> f32 {
-        self.header_h() + TABLE_HEADER_H * self.scale
+        self.header_h()
     }
 
     pub fn content_view_h(&self) -> f32 {
         (self.height - self.content_top() - self.footer_h()).max(0.0)
-    }
-
-    fn columns(&self) -> [Rect; 4] {
-        let gap = COLUMN_GAP * self.scale;
-        let available = (self.width - self.pad() * 2.0 - gap * 3.0).max(0.0);
-        let code = (48.0 * self.scale).min(available * 0.2);
-        let rest = available - code;
-        let widths = [code, rest * 0.23, rest * 0.25, rest * 0.52];
-        let mut x = self.pad();
-        widths.map(|w| {
-            let rect = Rect {
-                x,
-                y: 0.0,
-                w,
-                h: ROW_H * self.scale,
-            };
-            x += w + gap;
-            rect
-        })
     }
 }
 
@@ -131,6 +114,9 @@ pub struct Entry {
     pub code: String,
     pub provider: String,
     pub model: String,
+    /// Short failure taxonomy (`fail`, `error_type`), kept apart from the log
+    /// prose so the log column stays readable.
+    pub kind: String,
     pub log: String,
     color: u32,
 }
@@ -147,17 +133,18 @@ impl Entry {
             (None, Some(k)) => format!("({k})"),
             _ => fmt::BLANK.into(),
         };
-        let reasons: Vec<_> = [
-            attempt.fail.as_deref(),
-            attempt.error_type.as_deref(),
-            attempt.error.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .filter(|text| !text.trim().is_empty())
-        .collect();
+        let kinds: Vec<_> = [attempt.fail.as_deref(), attempt.error_type.as_deref()]
+            .into_iter()
+            .flatten()
+            .filter(|text| !text.trim().is_empty())
+            .collect();
+        let reason = attempt
+            .error
+            .as_deref()
+            .filter(|text| !text.trim().is_empty());
         let failed = attempt.status_code.is_some_and(|s| s >= 400)
-            || !reasons.is_empty()
+            || !kinds.is_empty()
+            || reason.is_some()
             || attempt.handed_on;
         Self {
             code: attempt
@@ -171,14 +158,12 @@ impl Entry {
             } else {
                 display_model_name(&attempt.model, &config.model_aliases)
             },
-            log: if reasons.is_empty() {
-                if failed {
-                    "记录未提供错误原因".into()
-                } else {
-                    fmt::BLANK.into()
-                }
-            } else {
-                reasons.join("\n")
+            kind: kinds.join(" · "),
+            log: match reason {
+                Some(error) => error.to_string(),
+                // Without a type the missing reason has to be stated here.
+                None if kinds.is_empty() && failed => "记录未提供错误原因".into(),
+                None => fmt::BLANK.into(),
             },
             color: if failed {
                 theme::RED
@@ -209,8 +194,14 @@ impl Entry {
         )
     }
 
-    fn cells(&self) -> [&str; 4] {
-        [&self.code, &self.provider, &self.model, &self.log]
+    fn cells(&self) -> [&str; 5] {
+        [
+            &self.code,
+            &self.provider,
+            &self.model,
+            &self.kind,
+            &self.log,
+        ]
     }
 }
 
@@ -277,6 +268,7 @@ impl Doc {
             // A route-level reason cannot identify one supplier/model attempt.
             entry.provider = fmt::BLANK.into();
             entry.model = fmt::BLANK.into();
+            entry.kind = fmt::BLANK.into();
             entry.log = error.into();
             entry.color = theme::RED;
             rows.push(entry);
@@ -335,20 +327,99 @@ struct TableLayout {
     height: f32,
 }
 
+/// The first line's four fields at their own text width: the widest single
+/// line of each column's cells plus the cell padding.
+fn natural_widths(doc: &Doc, scale: f32, measure: impl Fn(&str) -> f32) -> [f32; 4] {
+    let mut widths = [0.0f32; 4];
+    for row in &doc.rows {
+        for (index, text) in row.cells()[..4].iter().enumerate() {
+            let widest = text.split('\n').map(&measure).fold(0.0f32, f32::max);
+            widths[index] = widths[index].max(widest);
+        }
+    }
+    for width in &mut widths {
+        *width += CELL_PAD * 2.0 * scale;
+    }
+    widths
+}
+
+/// Widest log line, capped: past the cap the log wraps rather than widening the
+/// popup further.
+fn log_width(doc: &Doc, scale: f32, measure: impl Fn(&str) -> f32) -> f32 {
+    doc.rows
+        .iter()
+        .flat_map(|row| row.log.split('\n'))
+        .map(&measure)
+        .fold(0.0f32, f32::max)
+        .min(MAX_LOG_W * scale)
+}
+
+/// The widths the first line's columns are drawn at. A window narrower than
+/// they need shrinks all four together; wider windows leave the spare room
+/// blank, so a short table does not stretch.
+fn fitted_widths(natural: [f32; 4], width: f32, scale: f32) -> [f32; 4] {
+    let available = (width - PAD * 2.0 * scale - COLUMN_GAP * 3.0 * scale).max(0.0);
+    let total: f32 = natural.iter().sum();
+    if total <= available {
+        return natural;
+    }
+    let keep = (available / total).max(0.0);
+    natural.map(|w| (w * keep).max(1.0))
+}
+
+/// Column rectangles for the first line, one per field.
+fn column_rects(m: &Popup, widths: &[f32; 4]) -> [Rect; 4] {
+    let gap = COLUMN_GAP * m.scale;
+    let mut x = m.pad();
+    widths.map(|w| {
+        let rect = Rect {
+            x,
+            y: 0.0,
+            w,
+            h: ROW_H * m.scale,
+        };
+        x += w + gap;
+        rect
+    })
+}
+
+/// Client width the document asks for: the first-line fields, or the longest
+/// log line up to its cap, floored at `MIN_W`.
+fn width_of(natural: &[f32; 4], log: f32, m: &Popup) -> f32 {
+    let columns = m.pad() * 2.0 + natural.iter().sum::<f32>() + COLUMN_GAP * 3.0 * m.scale;
+    let log = m.pad() * 2.0 + log;
+    columns.max(log).max(MIN_W * m.scale)
+}
+
+/// Client width the document asks for. Callers clamp it to the monitor.
+pub fn desired_width(m: &Popup, doc: &Doc, measure: impl Fn(&str) -> f32) -> f32 {
+    width_of(
+        &natural_widths(doc, m.scale, &measure),
+        log_width(doc, m.scale, &measure),
+        m,
+    )
+}
+
 /// The same row-height calculation drives painting and pure geometry tests.
-fn layout(m: &Popup, doc: &Doc, wrap: impl Fn(&str, f32) -> Vec<String>) -> TableLayout {
+fn layout(
+    m: &Popup,
+    doc: &Doc,
+    widths: &[f32; 4],
+    wrap: impl Fn(&str, f32) -> Vec<String>,
+) -> TableLayout {
     let mut visuals = Vec::new();
     let mut bands = Vec::new();
     let row_h = ROW_H * m.scale;
     let cell_pad = CELL_PAD * m.scale;
+    let content_w = (m.width - m.pad() * 2.0).max(1.0);
     let mut y = cell_pad;
     if !doc.notice.is_empty() {
-        for text in wrap(&doc.notice, m.width - m.pad() * 2.0) {
+        for text in wrap(&doc.notice, content_w) {
             visuals.push(Visual {
                 rect: Rect {
                     x: m.pad(),
                     y,
-                    w: m.width - m.pad() * 2.0,
+                    w: content_w,
                     h: row_h,
                 },
                 text,
@@ -358,29 +429,43 @@ fn layout(m: &Popup, doc: &Doc, wrap: impl Fn(&str, f32) -> Vec<String>) -> Tabl
         }
         y += cell_pad;
     }
-    let columns = m.columns();
+    let columns = column_rects(m, widths);
     for row in &doc.rows {
-        let cells = row
-            .cells()
-            .into_iter()
+        let head = row.cells()[..4]
+            .iter()
             .zip(columns)
-            .map(|(text, rect)| (wrap(text, rect.w), rect))
+            .map(|(text, rect)| {
+                let inner = (rect.w - cell_pad * 2.0).max(1.0);
+                (
+                    wrap(text, inner),
+                    Rect {
+                        x: rect.x + cell_pad,
+                        w: inner,
+                        ..rect
+                    },
+                )
+            })
             .collect::<Vec<_>>();
-        let height = cells
+        let head_lines = head
             .iter()
             .map(|(lines, _)| lines.len())
             .max()
             .unwrap_or(1)
-            .max(1) as f32
-            * row_h
-            + cell_pad * 2.0;
+            .max(1);
+        // A record without a log stays one line tall.
+        let log_lines = if row.log.is_empty() {
+            Vec::new()
+        } else {
+            wrap(&row.log, content_w)
+        };
+        let height = (head_lines + log_lines.len()) as f32 * row_h + cell_pad * 2.0;
         bands.push(Rect {
             x: m.pad(),
             y,
-            w: m.width - m.pad() * 2.0,
+            w: content_w,
             h: height,
         });
-        for (index, (lines, column)) in cells.into_iter().enumerate() {
+        for (index, (lines, column)) in head.into_iter().enumerate() {
             let color = match index {
                 0 | 3 => row.color,
                 1 => theme::CYAN,
@@ -397,6 +482,19 @@ fn layout(m: &Popup, doc: &Doc, wrap: impl Fn(&str, f32) -> Vec<String>) -> Tabl
                 });
             }
         }
+        let log_top = y + cell_pad + head_lines as f32 * row_h;
+        for (line, text) in log_lines.into_iter().enumerate() {
+            visuals.push(Visual {
+                rect: Rect {
+                    x: m.pad(),
+                    y: log_top + line as f32 * row_h,
+                    w: content_w,
+                    h: row_h,
+                },
+                text,
+                color: row.color,
+            });
+        }
         y += height;
     }
     TableLayout {
@@ -406,7 +504,15 @@ fn layout(m: &Popup, doc: &Doc, wrap: impl Fn(&str, f32) -> Vec<String>) -> Tabl
     }
 }
 
-pub fn draw(p: &Painter, fonts: &Fonts, m: &Popup, v: &View) -> f32 {
+/// What one frame measured: the height the document needs, and the client
+/// width it asks for (the caller resizes when the two differ).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Frame {
+    pub height: f32,
+    pub width: f32,
+}
+
+pub fn draw(p: &Painter, fonts: &Fonts, m: &Popup, v: &View) -> Frame {
     p.fill_rect(0.0, 0.0, m.width, m.height, theme::BG);
     let edge = m.scale.max(1.0);
     let border = theme::with_alpha(theme::BORDER, 0xE0);
@@ -424,18 +530,6 @@ pub fn draw(p: &Painter, fonts: &Fonts, m: &Popup, v: &View) -> f32 {
         theme::TEXT,
         theme::ALIGN_NEAR,
     );
-    for (label, column) in HEADERS.into_iter().zip(m.columns()) {
-        p.dual_text(
-            &fonts.small,
-            label,
-            column.x,
-            m.header_h() + 3.0 * m.scale,
-            column.w,
-            column.h,
-            theme::TEXT_DIM,
-            theme::ALIGN_NEAR,
-        );
-    }
     p.fill_rect(
         m.pad(),
         m.content_top() - edge,
@@ -478,7 +572,13 @@ pub fn draw(p: &Painter, fonts: &Fonts, m: &Popup, v: &View) -> f32 {
             theme::ALIGN_NEAR,
         );
     }
-    let table = layout(m, v.doc, |text, width| p.wrap(&fonts.small, text, width));
+    let measure = |text: &str| p.dual_measure(&fonts.small, text);
+    let natural = natural_widths(v.doc, m.scale, measure);
+    let width = width_of(&natural, log_width(v.doc, m.scale, measure), m);
+    let widths = fitted_widths(natural, m.width, m.scale);
+    let table = layout(m, v.doc, &widths, |text, inner| {
+        p.wrap(&fonts.small, text, inner)
+    });
     let top = m.content_top();
     let view_h = m.content_view_h();
     p.clip(RectF {
@@ -522,7 +622,10 @@ pub fn draw(p: &Painter, fonts: &Fonts, m: &Popup, v: &View) -> f32 {
     }
     p.reset_clip();
     draw_scrollbar(p, m, table.height, v.scroll);
-    table.height
+    Frame {
+        height: table.height,
+        width,
+    }
 }
 
 fn draw_scrollbar(p: &Painter, m: &Popup, content_h: f32, scroll: f32) {

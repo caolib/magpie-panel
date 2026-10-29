@@ -1288,6 +1288,8 @@ enum Action {
     SetOpacity(u8),
     /// Resize the window to the client width the table's columns asked for.
     FitTableWidth(i32),
+    /// Resize the detail popup to the client width its columns asked for.
+    FitDetailWidth(i32),
     /// Toggle `WS_EX_NOACTIVATE` so the window can (or cannot) take focus.
     SetActivatable(bool),
     /// Open the error-detail popup for a row of the list.
@@ -1511,6 +1513,7 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
                 save_window_state(hwnd);
                 invalidate(hwnd);
             }
+            Action::FitDetailWidth(width) => fit_detail_width(hwnd, width),
             Action::Paste => {
                 if let Some(text) = clipboard_text() {
                     State::with(|s| {
@@ -2638,6 +2641,70 @@ fn detail_geometry(point: POINT, scale: f32) -> WindowState {
     popup::at_point(point, width, height)
 }
 
+/// Measure the document with the panel's fonts without painting anything, so a
+/// freshly opened popup can be sized before it is shown.
+fn detail_wanted_width(hwnd: HWND) -> Option<i32> {
+    let popup = detail_metrics(hwnd);
+    let hdc = unsafe { GetDC(Some(hwnd)) };
+    if hdc.is_invalid() {
+        return None;
+    }
+    let width = Painter::new(hdc).and_then(|painter| {
+        State::with(|s| {
+            let open = s.detail.as_ref()?;
+            Some(detail::desired_width(&popup, &open.doc, |text| {
+                painter.dual_measure(&s.fonts.small, text)
+            }))
+        })
+        .flatten()
+    });
+    unsafe {
+        let _ = ReleaseDC(Some(hwnd), hdc);
+    }
+    width.map(|w| w.ceil() as i32)
+}
+
+/// Resize the popup to the client width its columns asked for, keeping its left
+/// edge and staying inside the monitor.
+fn fit_detail_width(hwnd: HWND, client: i32) {
+    let scale = State::with(|s| s.scale).unwrap_or_else(|| window_scale(hwnd));
+    let mut wr = RECT::default();
+    let mut cr = RECT::default();
+    unsafe {
+        let _ = GetWindowRect(hwnd, &mut wr);
+        let _ = GetClientRect(hwnd, &mut cr);
+    }
+    let frame = (wr.right - wr.left) - (cr.right - cr.left);
+    let wanted = (client + frame).max(ui::layout::device_px(detail::MIN_W as i32, scale));
+    if (wanted - (wr.right - wr.left)).abs() < 2 {
+        return;
+    }
+    let placed = config::clamp_to_virtual_screen(
+        WindowState {
+            x: wr.left,
+            y: wr.top,
+            width: wanted,
+            height: wr.bottom - wr.top,
+        },
+        work_area_for(hwnd),
+        scale,
+    );
+    if placed.width == wr.right - wr.left {
+        return;
+    }
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            placed.x,
+            placed.y,
+            placed.width,
+            placed.height,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
+
 /// Create the popup window. It is owned by the panel, so it always stays above
 /// it and goes away with it.
 fn create_detail_window(panel: HWND, geom: WindowState) -> Option<HWND> {
@@ -2740,9 +2807,12 @@ fn open_detail(panel: HWND, index: usize, point: POINT) {
             });
         }
     });
-    if existing.is_some() {
-        place_detail_at(hwnd, point);
+    // Measure before showing or moving: the first frame should already have the
+    // width the columns ask for, not open wide and snap in.
+    if let Some(width) = detail_wanted_width(hwnd) {
+        fit_detail_width(hwnd, width);
     }
+    place_detail_at(hwnd, point);
     unsafe {
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = SetForegroundWindow(hwnd);
@@ -2789,7 +2859,11 @@ unsafe extern "system" fn detail_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             return unsafe { DefWindowProcW(hwnd, msg, wp, lp) };
         }
         popup::WM_DISMISS => popup::dismiss_if_inactive(hwnd),
-        WM_PAINT => paint_detail(hwnd),
+        WM_PAINT => {
+            if let Some(width) = paint_detail(hwnd) {
+                actions.push(Action::FitDetailWidth(width));
+            }
+        }
         WM_ERASEBKGND => {}
         WM_NCHITTEST => {
             let mut rc = RECT::default();
@@ -3033,10 +3107,12 @@ fn detail_key(hwnd: HWND, wp: WPARAM, actions: &mut Vec<Action>) {
     }
 }
 
-fn paint_detail(hwnd: HWND) {
+/// Paint one popup frame. Returns the client width its columns want when that
+/// differs from the one it has, so the caller can queue a resize.
+fn paint_detail(hwnd: HWND) -> Option<i32> {
     let popup = detail_metrics(hwnd);
     let view_h = popup.content_view_h();
-    let content_h;
+    let frame;
 
     unsafe {
         let mut ps = PAINTSTRUCT::default();
@@ -3052,10 +3128,10 @@ fn paint_detail(hwnd: HWND) {
             }
         });
 
-        content_h = with_double_buffer(hdc, rc, |painter| {
+        frame = with_double_buffer(hdc, rc, |painter| {
             State::with(|s| {
                 let Some(open) = s.detail.as_ref() else {
-                    return 0.0;
+                    return detail::Frame::default();
                 };
                 let view = detail::View {
                     doc: &open.doc,
@@ -3064,16 +3140,22 @@ fn paint_detail(hwnd: HWND) {
                 };
                 detail::draw(&painter, &s.fonts, &popup, &view)
             })
-            .unwrap_or(0.0)
+            .unwrap_or_default()
         })
-        .unwrap_or(0.0);
+        .unwrap_or_default();
 
         let _ = EndPaint(hwnd, &ps);
     }
 
     State::with(|s| {
         if let Some(open) = s.detail.as_mut() {
-            open.content_h = content_h;
+            open.content_h = frame.height;
         }
     });
+
+    if (frame.width - popup.width).abs() > 1.0 {
+        Some(frame.width.ceil() as i32)
+    } else {
+        None
+    }
 }

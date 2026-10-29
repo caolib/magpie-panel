@@ -17,12 +17,12 @@ const FULL: &str = r#"{
 }"#;
 
 #[test]
-fn details_only_contain_the_four_requested_fields() {
+fn details_only_contain_the_five_requested_fields() {
     let doc = Doc::with_detail(&row(FULL), &ExecutionDetail::loading(), &Config::default());
     assert_eq!(doc.rows.len(), 1);
     assert_eq!(
         doc.rows[0].cells(),
-        ["502", "Anthropic(main)", "model", "upstream said no"]
+        ["502", "Anthropic(main)", "model", "", "upstream said no"]
     );
     let text = plain_text(&doc);
     for label in HEADERS {
@@ -67,7 +67,9 @@ fn recovered_success_keeps_each_failure_and_final_result_in_order() {
         doc.rows.iter().map(|r| r.code.as_str()).collect::<Vec<_>>(),
         ["429", "502", "200"]
     );
-    assert_eq!(doc.rows[0].log, "rate\nfirst failure");
+    assert_eq!(doc.rows[0].kind, "rate");
+    assert_eq!(doc.rows[0].log, "first failure");
+    assert_eq!(doc.rows[1].kind, "");
     assert_eq!(doc.rows[1].log, "second failure\nmore details");
     assert_eq!(doc.rows[2].log, fmt::BLANK);
     assert!(
@@ -120,7 +122,8 @@ fn missing_status_is_not_fabricated_and_missing_reason_is_explicit() {
         &ExecutionDetail::loading(),
         &config,
     );
-    assert_eq!(typed.rows[0].log, "rate_limit_error\nslow down");
+    assert_eq!(typed.rows[0].kind, "rate_limit_error");
+    assert_eq!(typed.rows[0].log, "slow down");
     let unknown = Entry::from_attempt(&Attempt::default(), &config);
     assert_eq!(unknown.code, fmt::BLANK);
     assert_eq!(unknown.log, fmt::BLANK);
@@ -257,21 +260,117 @@ fn one_click_hits_only_copy_or_close() {
     assert_eq!(hit_button(&m, POPUP_W / 2.0, POPUP_H / 2.0), None);
 }
 
+fn measure_chars(text: &str) -> f32 {
+    text.chars().count() as f32 * 7.0
+}
+
+fn sample_doc(log: &str) -> Doc {
+    let raw = row(r#"{"status":502,"model":"m","providerName":"p","err":"short"}"#);
+    let mut detail = ExecutionDetail::loading();
+    detail.notice.clear();
+    detail.attempts = vec![Attempt {
+        model: "m".into(),
+        provider: Some("p".into()),
+        status_code: Some(502),
+        error: Some(log.into()),
+        ..Default::default()
+    }];
+    Doc::with_detail(&raw, &detail, &Config::default())
+}
+
 #[test]
-fn table_columns_fit_the_window_and_scale_together() {
-    for width in [MIN_W, POPUP_W, 1000.0] {
+fn first_line_fields_fit_their_text_and_narrow_windows_shrink_them() {
+    let doc = sample_doc(&"长错误".repeat(200));
+    let natural = natural_widths(&doc, 1.0, measure_chars);
+    assert_eq!(natural[0], measure_chars("502") + CELL_PAD * 2.0);
+    assert_eq!(natural[1], measure_chars("p") + CELL_PAD * 2.0);
+    assert_eq!(natural[2], measure_chars("m") + CELL_PAD * 2.0);
+    assert_eq!(natural[3], CELL_PAD * 2.0);
+
+    // The log no longer owns a column: it only caps how wide the popup may get.
+    assert_eq!(log_width(&doc, 1.0, measure_chars), MAX_LOG_W);
+    let narrow = Popup::new(MIN_W, POPUP_H, 1.0);
+    assert_eq!(
+        desired_width(&narrow, &doc, measure_chars),
+        MAX_LOG_W + PAD * 2.0
+    );
+
+    // Narrower than the fields need: they shrink together.
+    let wide_fields = [300.0f32; 4];
+    let fit = fitted_widths(wide_fields, MIN_W, 1.0);
+    let total = fit.iter().sum::<f32>() + COLUMN_GAP * 3.0 + PAD * 2.0;
+    assert!((total - MIN_W).abs() < 0.01);
+    // Wider: the fields keep their own width and the rest stays blank.
+    assert_eq!(fitted_widths(natural, 2000.0, 1.0), natural);
+}
+
+#[test]
+fn short_records_keep_the_popup_at_its_minimum_width() {
+    let doc = sample_doc("short");
+    let m = Popup::new(MIN_W, POPUP_H, 1.0);
+    assert_eq!(desired_width(&m, &doc, measure_chars), MIN_W);
+
+    let scaled = natural_widths(&doc, 2.0, |text| measure_chars(text) * 2.0);
+    for (a, b) in natural_widths(&doc, 1.0, measure_chars)
+        .iter()
+        .zip(scaled.iter())
+    {
+        assert!((a * 2.0 - b).abs() < 0.001);
+    }
+    let m2 = Popup::new(MIN_W * 2.0, POPUP_H * 2.0, 2.0);
+    assert!(
+        (desired_width(&m, &doc, measure_chars) * 2.0
+            - desired_width(&m2, &doc, |text| measure_chars(text) * 2.0))
+        .abs()
+            < 0.001
+    );
+}
+
+#[test]
+fn failure_type_gets_its_own_column_and_the_log_keeps_the_prose() {
+    let raw = row(r#"{"status":502,"model":"m"}"#);
+    let mut detail = ExecutionDetail::loading();
+    detail.attempts = vec![Attempt {
+        status_code: Some(502),
+        model: "m".into(),
+        fail: Some("rate".into()),
+        error_type: Some("rate_limit_error".into()),
+        error: Some("slow down".into()),
+        ..Default::default()
+    }];
+    let doc = Doc::with_detail(&raw, &detail, &Config::default());
+    assert_eq!(doc.rows[0].kind, "rate · rate_limit_error");
+    assert_eq!(doc.rows[0].log, "slow down");
+    let text = plain_text(&doc);
+    assert!(text.contains("类型: rate · rate_limit_error\n"));
+    assert!(text.contains("错误日志: slow down\n"));
+}
+
+#[test]
+fn the_log_starts_a_new_line_below_the_fields_without_indent() {
+    let doc = sample_doc("first\nsecond");
+    let widths = fitted_widths(natural_widths(&doc, 1.0, measure_chars), MIN_W, 1.0);
+    for width in [MIN_W, MAX_LOG_W + PAD * 2.0 + 100.0] {
         let m = Popup::new(width, POPUP_H, 1.0);
-        let columns = m.columns();
-        assert_eq!(columns[0].x, m.pad());
-        assert!((columns[3].x + columns[3].w - (m.width - m.pad())).abs() < 0.001);
-        assert!(columns.windows(2).all(|c| c[0].x + c[0].w < c[1].x));
-        assert!(columns[3].w > columns[1].w && columns[3].w > columns[2].w);
-        let scaled = Popup::new(width * 2.0, POPUP_H * 2.0, 2.0);
-        for (a, b) in columns.into_iter().zip(scaled.columns()) {
-            assert_eq!(a.x * 2.0, b.x);
-            assert_eq!(a.w * 2.0, b.w);
-        }
-        assert_eq!(m.content_view_h() * 2.0, scaled.content_view_h());
+        let table = layout(&m, &doc, &widths, wrap_chars);
+        let find = |text: &str| {
+            table
+                .visuals
+                .iter()
+                .find(|v| v.text == text)
+                .unwrap_or_else(|| panic!("missing {text}"))
+                .rect
+        };
+        let code = find("502");
+        let first = find("first");
+        let second = find("second");
+        assert_eq!(code.y, CELL_PAD * 2.0);
+        assert_eq!(first.y, CELL_PAD * 2.0 + ROW_H);
+        assert_eq!(second.y, CELL_PAD * 2.0 + ROW_H * 2.0);
+        assert!(code.x > m.pad());
+        assert_eq!(first.x, m.pad());
+        assert_eq!(first.w, m.width - m.pad() * 2.0);
+        assert_eq!(first.w, second.w);
     }
 }
 
@@ -314,7 +413,8 @@ fn long_errors_wrap_inside_fixed_columns_and_rows_never_overlap() {
     ];
     let doc = Doc::with_detail(&raw, &detail, &Config::default());
     let m = Popup::new(MIN_W, POPUP_H, 1.0);
-    let table = layout(&m, &doc, wrap_chars);
+    let widths = fitted_widths(natural_widths(&doc, 1.0, measure_chars), MIN_W, 1.0);
+    let table = layout(&m, &doc, &widths, wrap_chars);
     assert!(table.height > m.content_view_h());
     assert!(table.bands.windows(2).all(|r| r[0].y + r[0].h <= r[1].y));
     assert!(
