@@ -27,6 +27,15 @@ pub struct Popup {
     owner: HWND,
     fonts: Fonts,
     scale: f32,
+    /// Outer size in logical units (96-DPI points). The window is always resized
+    /// from this, never by a ratio on its current rectangle: a resize issued
+    /// inside the interactive move loop can be reverted by the loop, and
+    /// scaling whatever size survived shrinks the window a little on each
+    /// crossing.
+    logical: (f32, f32),
+    /// Set while the user drags a sizing border, so the size they chose is kept
+    /// instead of being overwritten by the logical size.
+    resizing: bool,
     ui: settings::State,
     anchor: POINT,
     search: Option<SearchBox>,
@@ -45,10 +54,13 @@ pub struct LoginReturn {
     anchor: POINT,
 }
 
+/// The settings window follows the Windows per-monitor DPI, not the panel's
+/// physical density. Both screens can sit at the same DPI setting while their
+/// pixels-per-inch differ wildly (a 189-ppi laptop next to a 92-ppi monitor), and
+/// the physical-density rule made the dialog halve in size when dragged between
+/// them. A plain dialog keeps its pixel size like every other Windows window.
 fn scale_for(hwnd: HWND) -> f32 {
-    crate::monitor_density(hwnd)
-        .unwrap_or_else(|| crate::windows_dpi_scale(hwnd))
-        .clamp(0.5, 4.0)
+    crate::windows_dpi_scale(hwnd).clamp(0.5, 4.0)
 }
 
 pub fn open(owner: HWND, point: POINT) {
@@ -124,6 +136,8 @@ pub fn open(owner: HWND, point: POINT) {
             hwnd,
             owner,
             scale,
+            logical: (settings::WIDTH, settings::HEIGHT),
+            resizing: false,
             fonts: Fonts::load(
                 scale,
                 &s.app.config.font_family,
@@ -138,6 +152,9 @@ pub fn open(owner: HWND, point: POINT) {
         })
     });
     crate::apply_window_chrome(hwnd);
+    // The window may have been created for the owner's monitor but landed on
+    // another; size it for the monitor it actually shows on.
+    apply_size(hwnd, settings::WIDTH * scale, settings::HEIGHT * scale);
     // The window's own WM_SIZE fires before `settings` is in place, so the
     // edit boxes would otherwise not appear until the first resize.
     sync_edit_boxes(hwnd);
@@ -501,7 +518,8 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                         right: x + w,
                         bottom: y + h,
                     };
-                    let fitted = fit(proposed, crate::work_area_of_rect(&proposed));
+                    let work = crate::work_area_of_rect(&proposed);
+                    let fitted = fit(proposed, work);
                     pos.x = fitted.left;
                     pos.y = fitted.top;
                     pos.cx = fitted.right - fitted.left;
@@ -511,6 +529,30 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             }
         }
         WM_DPICHANGED | WM_MOVE | WM_DISPLAYCHANGE => sync_scale(hwnd),
+        WM_SIZING => {
+            // The user is dragging a border: keep the size they pick instead of
+            // restamping the logical one when the drag ends.
+            PanelState::with(|s| {
+                if let Some(p) = s.settings.as_mut() {
+                    p.resizing = true;
+                }
+            });
+        }
+        WM_EXITSIZEMOVE => {
+            let resized =
+                PanelState::with(|s| s.settings.as_mut().map(|p| std::mem::take(&mut p.resizing)))
+                    .flatten()
+                    .unwrap_or(false);
+            let logical =
+                PanelState::with(|s| s.settings.as_ref().map(|p| (p.logical, p.scale))).flatten();
+            match logical {
+                Some(_) if resized => remember_size(hwnd),
+                // Resizing from inside the move loop can be reverted by the loop
+                // itself; apply the logical size once the drag has finished.
+                Some((size, scale)) => apply_size(hwnd, size.0 * scale, size.1 * scale),
+                None => {}
+            }
+        }
         WM_SIZE => {
             // `scroll` re-places the edit boxes for the new geometry.
             scroll(hwnd, 0.0);
@@ -541,49 +583,78 @@ fn fit(rect: RECT, work: (i32, i32, i32, i32)) -> RECT {
     }
 }
 
+/// Reload the fonts when the monitor scale changed and size the window from its
+/// logical size. The size is always recomputed from `logical`, never by scaling
+/// the current rectangle: a resize made from inside the interactive move loop
+/// can be reverted by the loop itself, and multiplying whatever size survived
+/// shrank the window a little on every crossing.
 fn sync_scale(hwnd: HWND) {
     let scale = scale_for(hwnd);
-    let ratio = PanelState::with(|s| {
+    let logical = PanelState::with(|s| {
         let p = s.settings.as_mut()?;
         if (scale - p.scale).abs() < 0.01 {
             return None;
         }
-        let ratio = scale / p.scale;
         p.scale = scale;
         p.fonts = Fonts::load(
             scale,
             &s.app.config.font_family,
             &s.app.config.cjk_font_family,
         );
-        Some(ratio)
+        Some(p.logical)
     })
-    .flatten()
-    .unwrap_or(1.0);
+    .flatten();
+    if let Some((width, height)) = logical {
+        apply_size(hwnd, width * scale, height * scale);
+    }
+    sync_edit_boxes(hwnd);
+    invalidate(hwnd);
+}
+
+/// Resize to `width` x `height` device pixels, keeping the left edge and staying
+/// wholly inside the monitor.
+fn apply_size(hwnd: HWND, width: f32, height: f32) {
     let mut rect = RECT::default();
     unsafe {
         let _ = GetWindowRect(hwnd, &mut rect);
     }
     let proposed = RECT {
-        right: rect.left + ((rect.right - rect.left) as f32 * ratio).round() as i32,
-        bottom: rect.top + ((rect.bottom - rect.top) as f32 * ratio).round() as i32,
+        right: rect.left + width.round() as i32,
+        bottom: rect.top + height.round() as i32,
         ..rect
     };
     let fitted = fit(proposed, crate::work_area_for(hwnd));
-    if fitted != rect {
-        unsafe {
-            let _ = SetWindowPos(
-                hwnd,
-                None,
-                fitted.left,
-                fitted.top,
-                fitted.right - fitted.left,
-                fitted.bottom - fitted.top,
-                SWP_NOZORDER | SWP_NOACTIVATE,
+    if fitted == rect {
+        return;
+    }
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            fitted.left,
+            fitted.top,
+            fitted.right - fitted.left,
+            fitted.bottom - fitted.top,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
+
+/// Remember the size the user dragged the window to, in logical units.
+fn remember_size(hwnd: HWND) {
+    let mut rect = RECT::default();
+    unsafe {
+        let _ = GetWindowRect(hwnd, &mut rect);
+    }
+    PanelState::with(|s| {
+        if let Some(p) = s.settings.as_mut() {
+            let scale = p.scale.max(0.01);
+            p.logical = (
+                (rect.right - rect.left) as f32 / scale,
+                (rect.bottom - rect.top) as f32 / scale,
             );
         }
-    }
-    sync_edit_boxes(hwnd);
-    invalidate(hwnd);
+    });
 }
 
 fn scroll(hwnd: HWND, delta: f32) {
