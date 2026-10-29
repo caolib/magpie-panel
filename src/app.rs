@@ -3,7 +3,7 @@
 //! Scroll clamping lives in the UI layer because it depends on the live window
 //! metrics; this module only records intent.
 
-use crate::config::{Account, Config, HiddenProvider, Stored};
+use crate::config::{Account, Config, HiddenProvider, Stored, WindowLevel};
 use crate::model::{self, Filter, FilterMask, Row};
 use crate::ui::login::LoginForm;
 use crate::worker::{AccountIssue, Update};
@@ -123,6 +123,11 @@ impl App {
 
     pub fn is_login(&self) -> bool {
         self.view == View::Login
+    }
+
+    /// Normal windows activate on click; pinned layers only do so for text entry.
+    pub fn wants_activation(&self) -> bool {
+        self.is_login() || self.query_editing || self.config.window_level() == WindowLevel::Normal
     }
 
     /// How one connection is doing, for the menu: `None` when it answered the

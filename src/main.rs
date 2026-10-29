@@ -15,6 +15,10 @@ mod time;
 mod ui;
 mod worker;
 
+#[cfg(test)]
+#[path = "tests/main.rs"]
+mod tests;
+
 use std::cell::RefCell;
 
 use ui::clipboard::{clipboard_text, set_clipboard_text};
@@ -47,7 +51,8 @@ use windows::core::{PCWSTR, w};
 
 use app::{App, LoginTarget, View};
 use config::{
-    Account, Config, FONT_SIZE_MAX, FONT_SIZE_MIN, OPACITY_MAX, OPACITY_MIN, WindowState,
+    Account, Config, FONT_SIZE_MAX, FONT_SIZE_MIN, OPACITY_MAX, OPACITY_MIN, WindowLevel,
+    WindowState,
 };
 use theme::{Fonts, Painter};
 use time::now_unix;
@@ -192,6 +197,7 @@ const MENU_SETTINGS: usize = 1002;
 const MENU_TOPMOST: usize = 1200;
 const MENU_PIN_POSITION: usize = 1202;
 const MENU_BOTTOMMOST: usize = 1203;
+const MENU_NORMAL: usize = 1204;
 const MENU_ROWS_5: usize = 1400;
 const MENU_ROWS_10: usize = 1401;
 const MENU_ROWS_15: usize = 1402;
@@ -553,9 +559,9 @@ fn main() {
         let mut app = App::new(config.clone());
         app.stored = stored.clone();
 
-        // The list deliberately does not take the keyboard, so reading it never
-        // steals focus from other windows.
+        // Normal windows accept clicks, but only the form takes focus at startup.
         let wants_focus = app.is_login();
+        let activatable = app.wants_activation();
         let state = State {
             app,
             worker,
@@ -565,24 +571,23 @@ fn main() {
             targets_revision: 0,
             settings: None,
             settings_login: None,
-            activatable: wants_focus,
+            activatable,
             login_drag: false,
             scale: 1.0,
         };
         STATE.with(|s| *s.borrow_mut() = Some(state));
 
         let style = WS_POPUP;
-        // WS_EX_NOACTIVATE is what keeps the list from stealing focus; it is
-        // omitted while the sign-in form is up, since a window that is never
-        // activated never receives keyboard input.
+        // Pinned layers stay passive except during text entry. Normal windows
+        // omit WS_EX_NOACTIVATE so clicking raises them like other windows.
         // WS_EX_LAYERED lets `SetLayeredWindowAttributes` tune the whole-panel
         // opacity; the alpha is set to fully opaque at startup below and
         // adjusted from the settings field.
         let mut ex_style = WS_EX_TOOLWINDOW | WS_EX_LAYERED;
-        if !wants_focus {
+        if !activatable {
             ex_style |= WS_EX_NOACTIVATE;
         }
-        if config.always_on_top && !config.always_on_bottom {
+        if config.window_level() == WindowLevel::Topmost {
             ex_style |= WS_EX_TOPMOST;
         }
 
@@ -1209,19 +1214,18 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             return unsafe { DefWindowProcW(hwnd, msg, wp, lp) };
         }
         WM_ACTIVATE if wp.0 as u32 & 0xFFFF == WA_INACTIVE => {
-            // Focus left the panel. Stop accepting keys, unless the connection
-            // form is up — that one stays ready for the next keystroke.
-            let keep = State::with(|s| {
+            // End query entry on focus loss, but normal windows must still be
+            // able to activate on the next click.
+            let was_list = State::with(|s| {
                 if s.app.is_login() {
-                    return true;
+                    return false;
                 }
                 s.app.query_editing = false;
-                s.activatable = false;
-                false
+                true
             })
             .unwrap_or(false);
-            if !keep {
-                apply_activation(hwnd, false);
+            if was_list {
+                sync_activation(&mut actions);
                 actions.push(Action::Redraw);
             }
         }
@@ -1269,10 +1273,8 @@ enum Action {
     /// Resize the panel so the connection form fits (it is taller than a short
     /// list window), or back to the saved list geometry.
     FitLogin(bool),
-    /// Apply an always-on-top change to the live window.
-    SetTopmost(bool),
-    /// Pin the window to the bottom of the Z order; mutually exclusive with topmost.
-    SetBottom(bool),
+    /// Apply the selected Z-order mode to the live window.
+    SetWindowLevel(WindowLevel),
     /// Forget one saved account and its stored secrets.
     RemoveAccount(String),
     /// The window was resized by hand; fetch this many rows.
@@ -1354,41 +1356,9 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
                     restore_list_window(hwnd);
                 }
             }
-            Action::SetTopmost(on) => {
-                let insert_after = if on { HWND_TOPMOST } else { HWND_NOTOPMOST };
-                unsafe {
-                    let _ = SetWindowPos(
-                        hwnd,
-                        Some(insert_after),
-                        0,
-                        0,
-                        0,
-                        0,
-                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-                    );
-                }
-            }
-            Action::SetBottom(on) => {
-                State::with(|s| s.app.config.always_on_bottom = on);
-                unsafe {
-                    if on {
-                        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-                        let _ = SetWindowLongPtrW(
-                            hwnd,
-                            GWL_EXSTYLE,
-                            style & !(WS_EX_TOPMOST.0 as isize),
-                        );
-                    }
-                    let _ = SetWindowPos(
-                        hwnd,
-                        Some(if on { HWND_BOTTOM } else { HWND_NOTOPMOST }),
-                        0,
-                        0,
-                        0,
-                        0,
-                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-                    );
-                }
+            Action::SetWindowLevel(level) => {
+                apply_window_level(hwnd, level);
+                sync_activation(&mut actions);
             }
             Action::RefreshRowCount(rows) => {
                 let limit = rows.max(1) as i64;
@@ -1943,17 +1913,12 @@ fn rebuild_doc(open: &mut DetailPopup, config: &config::Config) {
     open.doc = detail::Doc::with_detail(&open.session.raw_row, &open.session.detail, config);
 }
 
-/// The window must accept focus while the connection form is up, and while the
-/// header query box is being typed in. A poll must not take it away mid-entry.
+/// Normal windows accept focus on click; pinned layers only need it for the
+/// connection form or query entry. A poll must not take it away mid-entry.
 fn sync_activation(actions: &mut Vec<Action>) {
-    let (wants, login, has) = State::with(|s| {
-        (
-            s.app.is_login() || s.app.query_editing,
-            s.app.is_login(),
-            s.activatable,
-        )
-    })
-    .unwrap_or((false, false, false));
+    let (wants, login, has) =
+        State::with(|s| (s.app.wants_activation(), s.app.is_login(), s.activatable))
+            .unwrap_or((false, false, false));
     if wants != has {
         actions.push(Action::SetActivatable(wants));
     }
@@ -1963,6 +1928,23 @@ fn sync_activation(actions: &mut Vec<Action>) {
     // the same size as the last one.
     if login {
         actions.push(Action::FitLogin(true));
+    }
+}
+
+fn apply_window_level(hwnd: HWND, level: WindowLevel) {
+    let insert_after = match level {
+        WindowLevel::Normal => HWND_NOTOPMOST,
+        WindowLevel::Topmost => HWND_TOPMOST,
+        WindowLevel::Bottommost => HWND_BOTTOM,
+    };
+    unsafe {
+        let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+        let _ = SetWindowPos(hwnd, Some(insert_after), 0, 0, 0, 0, flags);
+        if level == WindowLevel::Normal {
+            // NOTOPMOST does not raise an already non-topmost window, so a
+            // panel leaving bottom mode also needs a one-time raise.
+            let _ = SetWindowPos(hwnd, Some(HWND_TOP), 0, 0, 0, 0, flags);
+        }
     }
 }
 
@@ -2364,8 +2346,7 @@ fn on_key(hwnd: HWND, msg: u32, wp: WPARAM, actions: &mut Vec<Action>) {
     if lookup {
         // Escape clears the box, which also drops the filter.
         if State::with(|s| !s.app.query_editing).unwrap_or(false) {
-            apply_activation(hwnd, false);
-            State::with(|s| s.activatable = false);
+            sync_activation(actions);
         }
         submit_query(hwnd);
     } else if submit {
@@ -2442,59 +2423,60 @@ fn on_command(wp: WPARAM, actions: &mut Vec<Action>) {
     if !is_menu_command(id) {
         return;
     }
-    State::with(|s| match id {
-        MENU_REFRESH => s.worker.send(Command::RefreshNow),
-        MENU_TOPMOST => {
-            let on = !s.app.config.always_on_top;
-            s.app.config.always_on_top = on;
-            if on {
-                s.app.config.always_on_bottom = false;
+    let level = menu_window_level(id);
+    State::with(|s| {
+        if let Some(level) = level {
+            s.app.config.set_window_level(level);
+            actions.push(Action::SetWindowLevel(level));
+            return;
+        }
+        match id {
+            MENU_REFRESH => s.worker.send(Command::RefreshNow),
+            MENU_PIN_POSITION => {
+                s.app.config.pin_position = !s.app.config.pin_position;
             }
-            actions.push(Action::SetTopmost(on));
-        }
-        MENU_BOTTOMMOST => {
-            let on = !s.app.config.always_on_bottom;
-            s.app.config.always_on_bottom = on;
-            if on {
-                s.app.config.always_on_top = false;
+            MENU_SETTINGS => actions.push(Action::ShowSettings(popup::cursor())),
+            MENU_QUIT => actions.push(Action::Quit),
+            MENU_ROWS_5 => actions.push(Action::ResizeToRows(5)),
+            MENU_ROWS_10 => actions.push(Action::ResizeToRows(10)),
+            MENU_ROWS_15 => actions.push(Action::ResizeToRows(15)),
+            MENU_ROWS_20 => actions.push(Action::ResizeToRows(20)),
+            _ if (MENU_FONT_BASE..=MENU_FONT_MAX).contains(&id) => {
+                actions.push(Action::SetFontSize((10 + (id - MENU_FONT_BASE)) as f32));
             }
-            actions.push(Action::SetBottom(on));
+            _ => {}
         }
-        MENU_PIN_POSITION => {
-            s.app.config.pin_position = !s.app.config.pin_position;
-        }
-        MENU_SETTINGS => actions.push(Action::ShowSettings(popup::cursor())),
-        MENU_QUIT => actions.push(Action::Quit),
-        MENU_ROWS_5 => actions.push(Action::ResizeToRows(5)),
-        MENU_ROWS_10 => actions.push(Action::ResizeToRows(10)),
-        MENU_ROWS_15 => actions.push(Action::ResizeToRows(15)),
-        MENU_ROWS_20 => actions.push(Action::ResizeToRows(20)),
-        _ if (MENU_FONT_BASE..=MENU_FONT_MAX).contains(&id) => {
-            actions.push(Action::SetFontSize((10 + (id - MENU_FONT_BASE)) as f32));
-        }
-        _ => {}
     });
     // Settings changed by a menu command are persisted after the borrow ends.
-    if id == MENU_TOPMOST || id == MENU_PIN_POSITION || id == MENU_BOTTOMMOST {
+    if level.is_some() || id == MENU_PIN_POSITION {
         actions.push(Action::Save);
     }
     actions.push(Action::Redraw);
 }
 
+fn menu_window_level(id: usize) -> Option<WindowLevel> {
+    match id {
+        MENU_NORMAL => Some(WindowLevel::Normal),
+        MENU_TOPMOST => Some(WindowLevel::Topmost),
+        MENU_BOTTOMMOST => Some(WindowLevel::Bottommost),
+        _ => None,
+    }
+}
+
 fn is_menu_command(id: usize) -> bool {
-    matches!(
-        id,
-        MENU_REFRESH
-            | MENU_SETTINGS
-            | MENU_QUIT
-            | MENU_TOPMOST
-            | MENU_BOTTOMMOST
-            | MENU_PIN_POSITION
-            | MENU_ROWS_5
-            | MENU_ROWS_10
-            | MENU_ROWS_15
-            | MENU_ROWS_20
-    ) || (MENU_FONT_BASE..=MENU_FONT_MAX).contains(&id)
+    menu_window_level(id).is_some()
+        || matches!(
+            id,
+            MENU_REFRESH
+                | MENU_SETTINGS
+                | MENU_QUIT
+                | MENU_PIN_POSITION
+                | MENU_ROWS_5
+                | MENU_ROWS_10
+                | MENU_ROWS_15
+                | MENU_ROWS_20
+        )
+        || (MENU_FONT_BASE..=MENU_FONT_MAX).contains(&id)
 }
 
 fn show_menu(hwnd: HWND) {
@@ -2518,9 +2500,9 @@ fn show_menu(hwnd: HWND) {
             let _ = AppendMenuW(menu, flags, id, PCWSTR(wide.as_mut_ptr()));
         };
 
-        let (pinned, bottom) =
-            State::with(|s| (s.app.config.pin_position, s.app.config.always_on_bottom))
-                .unwrap_or((false, false));
+        let (pinned, level) =
+            State::with(|s| (s.app.config.pin_position, s.app.config.window_level()))
+                .unwrap_or((false, WindowLevel::Normal));
         add("设置…", MENU_SETTINGS, false, true);
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         // Row count submenu.
@@ -2587,9 +2569,33 @@ fn show_menu(hwnd: HWND) {
 
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         add("固定窗口位置", MENU_PIN_POSITION, pinned, true);
-        let top = State::with(|s| s.app.config.always_on_top).unwrap_or(false);
-        add("置顶", MENU_TOPMOST, top, true);
-        add("置底", MENU_BOTTOMMOST, bottom, true);
+        // Z-order mode submenu: normal, topmost and bottommost are one choice.
+        if let Ok(level_menu) = CreatePopupMenu() {
+            let add_level = |text: &str, id: usize| {
+                let mut wide = text
+                    .encode_utf16()
+                    .chain(std::iter::once(0))
+                    .collect::<Vec<u16>>();
+                let mut flags = MF_STRING;
+                if menu_window_level(id) == Some(level) {
+                    flags |= MF_CHECKED;
+                }
+                let _ = AppendMenuW(level_menu, flags, id, PCWSTR(wide.as_mut_ptr()));
+            };
+            add_level("普通窗口", MENU_NORMAL);
+            add_level("置顶", MENU_TOPMOST);
+            add_level("置底", MENU_BOTTOMMOST);
+            let mut sub_label = "窗口层级"
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect::<Vec<u16>>();
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING | MF_POPUP,
+                level_menu.0 as usize,
+                PCWSTR(sub_label.as_mut_ptr()),
+            );
+        }
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         add("退出", MENU_QUIT, false, true);
 
@@ -2718,7 +2724,7 @@ fn create_detail_window(panel: HWND, geom: WindowState) -> Option<HWND> {
         .chain(std::iter::once(0))
         .collect();
     let mut ex_style = WS_EX_TOOLWINDOW;
-    if State::with(|s| s.app.config.always_on_top).unwrap_or(false) {
+    if State::with(|s| s.app.config.window_level() == WindowLevel::Topmost).unwrap_or(false) {
         ex_style |= WS_EX_TOPMOST;
     }
     let hwnd = unsafe {

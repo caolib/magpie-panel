@@ -162,6 +162,7 @@ fn no_settings_tab_or_footer_repeats_context_menu_operations() {
         "显示行数",
         "字号",
         "固定窗口位置",
+        "普通窗口",
         "置顶",
         "置底",
         "刷新",

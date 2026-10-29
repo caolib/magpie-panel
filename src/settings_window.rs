@@ -13,7 +13,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::w;
 
 use crate::app::{LoginTarget, View};
-use crate::config::{OPACITY_MAX, OPACITY_MIN, WindowState};
+use crate::config::{OPACITY_MAX, OPACITY_MIN, WindowLevel, WindowState};
 use crate::theme::Fonts;
 use crate::ui::font_search::{self, SearchBox};
 use crate::ui::layout::Rect;
@@ -1100,7 +1100,7 @@ pub fn finish_login(owner: HWND, cancel: bool) {
     // is leaving it, so return to the saved list size.
     actions.push(PanelAction::FitLogin(false));
     if PanelState::with(|s| s.app.config.always_on_bottom).unwrap_or(false) {
-        actions.push(PanelAction::SetBottom(true));
+        actions.push(PanelAction::SetWindowLevel(WindowLevel::Bottommost));
     }
     crate::run_actions(owner, actions);
     invalidate(owner);

@@ -14,6 +14,31 @@ fn app_with(rows: Vec<Row>) -> App {
 }
 
 #[test]
+fn normal_windows_remain_activatable_after_query_entry_ends() {
+    let mut app = app_with(Vec::new());
+    for level in [
+        WindowLevel::Normal,
+        WindowLevel::Topmost,
+        WindowLevel::Bottommost,
+    ] {
+        app.config.set_window_level(level);
+        app.view = View::List;
+        for editing in [false, true, false] {
+            app.query_editing = editing;
+            assert_eq!(
+                app.wants_activation(),
+                editing || level == WindowLevel::Normal
+            );
+        }
+        // Form entry always needs the keyboard, regardless of window level.
+        app.view = View::Login;
+        assert!(app.wants_activation());
+        app.view = View::List;
+        assert_eq!(app.wants_activation(), level == WindowLevel::Normal);
+    }
+}
+
+#[test]
 fn a_snapshot_replaces_the_list_newest_first() {
     let app = app_with(vec![
         row(r#"{"t":"2026-10-20T09:00:00Z","model":"a"}"#, "a1"),

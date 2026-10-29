@@ -62,6 +62,13 @@ pub struct Config {
     pub window: WindowState,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowLevel {
+    Normal,
+    Topmost,
+    Bottommost,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WindowState {
@@ -392,6 +399,22 @@ pub enum ConfigLoadStatus {
 }
 
 impl Config {
+    /// Keep the existing two-flag format; bottom wins for conflicting old configs.
+    pub fn window_level(&self) -> WindowLevel {
+        if self.always_on_bottom {
+            WindowLevel::Bottommost
+        } else if self.always_on_top {
+            WindowLevel::Topmost
+        } else {
+            WindowLevel::Normal
+        }
+    }
+
+    pub fn set_window_level(&mut self, level: WindowLevel) {
+        self.always_on_top = level == WindowLevel::Topmost;
+        self.always_on_bottom = level == WindowLevel::Bottommost;
+    }
+
     /// Load the config, reporting whether a corrupt file had to be discarded.
     pub fn load_with_status() -> (Config, ConfigLoadStatus) {
         match std::fs::read_to_string(config_path()) {

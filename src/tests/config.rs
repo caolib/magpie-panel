@@ -11,6 +11,61 @@ fn default_config_points_at_the_local_gateway() {
 }
 
 #[test]
+fn window_levels_are_mutually_exclusive_and_survive_restart() {
+    for (top, bottom) in [(false, false), (true, false), (false, true), (true, true)] {
+        for level in [
+            WindowLevel::Normal,
+            WindowLevel::Topmost,
+            WindowLevel::Bottommost,
+        ] {
+            let mut config = Config {
+                always_on_top: top,
+                always_on_bottom: bottom,
+                pin_position: true,
+                ..Config::default()
+            };
+            config.set_window_level(level);
+            // Selecting the checked item again must not toggle into another mode.
+            config.set_window_level(level);
+            assert_eq!(config.window_level(), level);
+            assert_eq!(config.always_on_top, level == WindowLevel::Topmost);
+            assert_eq!(config.always_on_bottom, level == WindowLevel::Bottommost);
+            assert!(config.pin_position);
+
+            let json = serde_json::to_string(&config).unwrap();
+            let back: Config = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.window_level(), level);
+        }
+    }
+}
+
+#[test]
+fn legacy_window_flags_keep_their_existing_meaning() {
+    assert_eq!(Config::default().window_level(), WindowLevel::Topmost);
+    for (json, level) in [
+        (
+            r#"{"alwaysOnTop":false,"alwaysOnBottom":false}"#,
+            WindowLevel::Normal,
+        ),
+        (
+            r#"{"alwaysOnTop":true,"alwaysOnBottom":false}"#,
+            WindowLevel::Topmost,
+        ),
+        (
+            r#"{"alwaysOnTop":false,"alwaysOnBottom":true}"#,
+            WindowLevel::Bottommost,
+        ),
+        (
+            r#"{"alwaysOnTop":true,"alwaysOnBottom":true}"#,
+            WindowLevel::Bottommost,
+        ),
+    ] {
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.window_level(), level);
+    }
+}
+
+#[test]
 fn initial_columns_show_exactly_the_requested_fields() {
     let expected = vec![
         DisplayField::Model,
