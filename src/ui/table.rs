@@ -41,7 +41,11 @@ impl Column {
             }
             let keep = match field {
                 DisplayField::Retry => v.rows.iter().any(has_retry),
-                DisplayField::Error => v.rows.iter().any(|row| error_code(row).is_some()),
+                // The cache cell already carries the status code of a failed
+                // request, so the error column only earns its width when the
+                // cache column is switched off.
+                DisplayField::Error => !v.shows(DisplayField::Cache)
+                    && v.rows.iter().any(|row| error_code(row).is_some()),
                 DisplayField::UpstreamModel => v.rows.iter().any(|row| row.served_model.is_some()),
                 _ => true,
             };

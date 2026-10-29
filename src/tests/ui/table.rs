@@ -64,10 +64,12 @@ fn columns_with_nothing_to_show_are_dropped() {
         assert!(!shown.contains(&absent), "{absent:?} should be hidden");
     }
 
+    // The error column only appears when the cache column is off: a failed
+    // row's status code already rides in the cache cell.
     let rich = vec![row(
         r#"{"model":"a","served":"b","providerKeyName":"k","status":500,"err":"boom","tries":2}"#,
     )];
-    let shown = fields(&rich, &[]);
+    let shown = fields(&rich, &[DisplayField::Cache]);
     for present in [
         DisplayField::Error,
         DisplayField::UpstreamModel,
@@ -75,6 +77,13 @@ fn columns_with_nothing_to_show_are_dropped() {
     ] {
         assert!(shown.contains(&present), "{present:?} should be shown");
     }
+}
+
+#[test]
+fn the_error_column_steps_aside_for_the_cache_column() {
+    let failed = [row(r#"{"model":"a","status":502}"#)];
+    assert!(!fields(&failed, &[]).contains(&DisplayField::Error));
+    assert!(fields(&failed, &[DisplayField::Cache]).contains(&DisplayField::Error));
 }
 
 #[test]
@@ -160,13 +169,13 @@ fn error_cells_only_show_codes_and_long_messages_never_widen_the_table() {
 #[test]
 fn error_column_can_show_a_status_only_record_but_not_an_error_message_without_a_code() {
     let failed = [row(r#"{"status":502}"#)];
-    assert!(fields(&failed, &[]).contains(&DisplayField::Error));
+    assert!(fields(&failed, &[DisplayField::Cache]).contains(&DisplayField::Error));
     assert_eq!(
         Column::Field(DisplayField::Error).text(&failed[0], 0),
         "502"
     );
     let without_code = [row(r#"{"status":0,"err":"timeout"}"#)];
-    assert!(!fields(&without_code, &[]).contains(&DisplayField::Error));
+    assert!(!fields(&without_code, &[DisplayField::Cache]).contains(&DisplayField::Error));
     assert_eq!(
         Column::Field(DisplayField::Error).text(&without_code[0], 0),
         ""

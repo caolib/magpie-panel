@@ -226,6 +226,8 @@ pub enum DisplayField {
     /// 来源: the client endpoint and the host it was sent to.
     Source,
     /// 错误: only the HTTP status code; messages belong in the detail popup.
+    /// The cache column already shows this code on failed rows, so the column
+    /// only appears when the cache column is switched off.
     Error,
     /// 连接: which saved gateway the request came from.
     Account,
