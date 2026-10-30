@@ -23,6 +23,11 @@ const CELL_SLACK: f32 = 0.5;
 /// The status cell is a dot, not a word.
 const STATUS_DOT: &str = "●";
 
+/// Latency thresholds in milliseconds: past a minute the whole cell turns
+/// yellow, past two minutes red.
+const LATENCY_SLOW_MS: i64 = 60_000;
+const LATENCY_CRITICAL_MS: i64 = 120_000;
+
 /// One table column: the status dot, followed by one column per visible cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Column {
@@ -44,8 +49,10 @@ impl Column {
                 // The cache cell already carries the status code of a failed
                 // request, so the error column only earns its width when the
                 // cache column is switched off.
-                DisplayField::Error => !v.shows(DisplayField::Cache)
-                    && v.rows.iter().any(|row| error_code(row).is_some()),
+                DisplayField::Error => {
+                    !v.shows(DisplayField::Cache)
+                        && v.rows.iter().any(|row| error_code(row).is_some())
+                }
                 DisplayField::UpstreamModel => v.rows.iter().any(|row| row.served_model.is_some()),
                 _ => true,
             };
@@ -141,13 +148,32 @@ impl Column {
                 DisplayField::CacheWrite | DisplayField::Speed => theme::TEXT_DIM,
                 DisplayField::Retry => theme::RED,
                 DisplayField::Cost => theme::YELLOW,
-                DisplayField::Latency | DisplayField::Completion => theme::TEXT_DIM,
+                DisplayField::Latency => latency_color(row),
+                DisplayField::Completion => theme::TEXT_DIM,
                 DisplayField::Source => theme::TEXT_FAINT,
                 DisplayField::Error => theme::RED,
                 DisplayField::Account => panel::account_color(v.accounts, &row.account_id),
                 DisplayField::CreatedAt => theme::TEXT_FAINT,
             },
         }
+    }
+}
+
+/// The whole latency cell takes one colour, keyed on the first-token reading:
+/// that is the wait an operator feels. A request still in flight has no first
+/// token yet, so its running total stands in.
+fn latency_color(row: &Row) -> u32 {
+    let ms = row
+        .first_token_ms
+        .filter(|ms| *ms > 0)
+        .or(row.latency_ms)
+        .unwrap_or(0);
+    if ms >= LATENCY_CRITICAL_MS {
+        theme::RED
+    } else if ms >= LATENCY_SLOW_MS {
+        theme::YELLOW
+    } else {
+        theme::TEXT_DIM
     }
 }
 

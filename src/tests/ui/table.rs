@@ -212,6 +212,35 @@ fn a_provider_keeps_the_colour_the_palette_gave_it() {
 }
 
 #[test]
+fn a_slow_first_token_warms_the_whole_latency_cell() {
+    let rows = [
+        row(r#"{"model":"a","ms":59999,"ttft_ms":59999}"#),
+        row(r#"{"model":"a","ms":60000,"ttft_ms":60000}"#),
+        row(r#"{"model":"a","ms":119999,"ttft_ms":119999}"#),
+        row(r#"{"model":"a","ms":120000,"ttft_ms":120000}"#),
+    ];
+    let v = view(&rows, &[]);
+    let color = |row: &Row| Column::Field(DisplayField::Latency).color(row, &v, &[], &[]);
+    assert_eq!(color(&rows[0]), theme::TEXT_DIM);
+    assert_eq!(color(&rows[1]), theme::YELLOW);
+    assert_eq!(color(&rows[2]), theme::YELLOW);
+    assert_eq!(color(&rows[3]), theme::RED);
+}
+
+#[test]
+fn a_latency_cell_without_a_first_token_judges_the_running_total() {
+    // A request still in flight has only its elapsed time so far.
+    let live = row(r#"{"model":"a","ms":130000}"#);
+    // A fast first token keeps the cell calm however long the rest took.
+    let long_generation = row(r#"{"model":"a","ms":200000,"ttft_ms":1000}"#);
+    let rows = [live.clone(), long_generation.clone()];
+    let v = view(&rows, &[]);
+    let color = |row: &Row| Column::Field(DisplayField::Latency).color(row, &v, &[], &[]);
+    assert_eq!(color(&live), theme::RED);
+    assert_eq!(color(&long_generation), theme::TEXT_DIM);
+}
+
+#[test]
 fn columns_are_as_wide_as_their_widest_cell() {
     let rows = vec![
         row(r#"{"model":"short"}"#),
