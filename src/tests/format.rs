@@ -52,7 +52,7 @@ fn cost_keeps_sub_cent_precision() {
 fn latency_names_whichever_side_arrived() {
     assert_eq!(
         latency(Some(789_200), Some(456_500)).as_deref(),
-        Some("[7m37s·13m09s]")
+        Some("[7m·37s|13m·09s]")
     );
     assert_eq!(latency(Some(4_500), None).as_deref(), Some("[4.5s]"));
     assert_eq!(latency(None, None), None);
@@ -64,8 +64,8 @@ fn latency_keeps_tenths_only_while_seconds_read_better() {
     // Under a minute the tenth is the interesting digit...
     assert_eq!(latency(Some(59_400), None).as_deref(), Some("[59.4s]"));
     // ...past it the reading turns into minutes, seconds rounded.
-    assert_eq!(latency(Some(190_400), None).as_deref(), Some("[3m10s]"));
-    assert_eq!(latency(Some(60_000), None).as_deref(), Some("[1m00s]"));
+    assert_eq!(latency(Some(190_400), None).as_deref(), Some("[3m·10s]"));
+    assert_eq!(latency(Some(60_000), None).as_deref(), Some("[1m·00s]"));
     // And hours once minutes stop being readable.
-    assert_eq!(latency(Some(3_725_000), None).as_deref(), Some("[1h02m]"));
+    assert_eq!(latency(Some(3_725_000), None).as_deref(), Some("[1h·02m]"));
 }
