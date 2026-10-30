@@ -173,6 +173,19 @@ fn sync_scale(hwnd: HWND) {
     }
     clamp_scroll(hwnd);
     invalidate(hwnd);
+
+    // The popup draws with the panel's fonts, so a new scale invalidates the
+    // size it had — including a height the user dragged. Let it follow the
+    // document again.
+    let popup = State::with(|s| {
+        let open = s.detail.as_mut()?;
+        open.height_fit = true;
+        Some(open.hwnd)
+    })
+    .flatten();
+    if let Some(popup) = popup {
+        invalidate(popup);
+    }
 }
 
 /// The row count configured by the user (derived from the window height).
@@ -225,6 +238,10 @@ struct DetailPopup {
     /// Content height as measured by the last paint, so a wheel event between
     /// two frames can clamp the offset without laying the document out again.
     content_h: f32,
+    /// Whether the window height still follows the document. Cleared once the
+    /// real content has landed or the user drags an edge, set again when the
+    /// scale changes and the old size no longer means anything.
+    height_fit: bool,
     hover: Option<Button>,
 }
 
@@ -1290,8 +1307,12 @@ enum Action {
     SetOpacity(u8),
     /// Resize the window to the client width the table's columns asked for.
     FitTableWidth(i32),
-    /// Resize the detail popup to the client width its columns asked for.
-    FitDetailWidth(i32),
+    /// Resize the detail popup to the client size its document asked for. The
+    /// height is `None` once the user has taken over by dragging an edge.
+    FitDetailSize {
+        width: i32,
+        height: Option<i32>,
+    },
     /// Toggle `WS_EX_NOACTIVATE` so the window can (or cannot) take focus.
     SetActivatable(bool),
     /// Open the error-detail popup for a row of the list.
@@ -1412,7 +1433,11 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
                         &s.app.config.cjk_font_family,
                     );
                     s.app.save();
-                    s.detail.as_ref().map(|p| p.hwnd)
+                    // Different glyph widths re-wrap the log, so the popup
+                    // height no longer matches its document.
+                    let open = s.detail.as_mut()?;
+                    open.height_fit = true;
+                    Some(open.hwnd)
                 })
                 .flatten();
                 settings_window::reload_fonts();
@@ -1483,7 +1508,7 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
                 save_window_state(hwnd);
                 invalidate(hwnd);
             }
-            Action::FitDetailWidth(width) => fit_detail_width(hwnd, width),
+            Action::FitDetailSize { width, height } => fit_detail_size(hwnd, width, height),
             Action::Paste => {
                 if let Some(text) = clipboard_text() {
                     State::with(|s| {
@@ -2632,12 +2657,19 @@ fn detail_metrics(hwnd: HWND) -> detail::Popup {
     unsafe {
         let _ = GetClientRect(hwnd, &mut rc);
     }
-    let scale = State::with(|s| s.scale).unwrap_or_else(|| window_scale(hwnd));
+    let scale = detail_scale(hwnd);
     detail::Popup::new(
         (rc.right - rc.left) as f32,
         (rc.bottom - rc.top) as f32,
         scale,
     )
+}
+
+/// The scale the popup is drawn with: the panel's, not its own monitor's, so
+/// the boxes always match the fonts they hold. Minimum and maximum sizes must
+/// use the same source or the limits disagree with the layout.
+fn detail_scale(hwnd: HWND) -> f32 {
+    State::with(|s| s.scale).unwrap_or_else(|| window_scale(hwnd))
 }
 
 /// Open at the clicked card, keeping the whole popup inside that monitor.
@@ -2648,64 +2680,78 @@ fn detail_geometry(point: POINT, scale: f32) -> WindowState {
 }
 
 /// Measure the document with the panel's fonts without painting anything, so a
-/// freshly opened popup can be sized before it is shown.
-fn detail_wanted_width(hwnd: HWND) -> Option<i32> {
+/// freshly opened popup can be sized before it is shown. The width is measured
+/// first because the height depends on how the log wraps at that width.
+fn detail_wanted_size(hwnd: HWND) -> Option<(i32, i32)> {
     let popup = detail_metrics(hwnd);
+    let work = work_area_for(hwnd);
+    let work_h = work.3 - work.1;
     let hdc = unsafe { GetDC(Some(hwnd)) };
     if hdc.is_invalid() {
         return None;
     }
-    let width = Painter::new(hdc).and_then(|painter| {
+    let size = Painter::new(hdc).and_then(|painter| {
         State::with(|s| {
             let open = s.detail.as_ref()?;
-            Some(detail::desired_width(&popup, &open.doc, |text| {
-                painter.dual_measure(&s.fonts.small, text)
-            }))
+            let measure = |text: &str| painter.dual_measure(&s.fonts.small, text);
+            let width = detail::desired_width(&popup, &open.doc, measure);
+            let sized = detail::Popup::new(width, popup.height, popup.scale);
+            let height = detail::desired_height(&sized, &open.doc, work_h, measure, |text, w| {
+                painter.wrap(&s.fonts.small, text, w)
+            });
+            Some((width.ceil() as i32, height.ceil() as i32))
         })
         .flatten()
     });
     unsafe {
         let _ = ReleaseDC(Some(hwnd), hdc);
     }
-    width.map(|w| w.ceil() as i32)
+    size
 }
 
-/// Resize the popup to the client width its columns asked for, keeping its left
-/// edge and staying inside the monitor.
-fn fit_detail_width(hwnd: HWND, client: i32) {
-    let scale = State::with(|s| s.scale).unwrap_or_else(|| window_scale(hwnd));
+/// Resize the popup to the client size its document asked for. The top edge
+/// stays put so the popup grows downward; when that would cross the work
+/// area's bottom it slides up instead. `height` is `None` while the user's
+/// dragged height is to be kept.
+fn fit_detail_size(hwnd: HWND, client_w: i32, client_h: Option<i32>) {
+    let scale = detail_scale(hwnd);
     let mut wr = RECT::default();
     let mut cr = RECT::default();
     unsafe {
         let _ = GetWindowRect(hwnd, &mut wr);
         let _ = GetClientRect(hwnd, &mut cr);
     }
-    let frame = (wr.right - wr.left) - (cr.right - cr.left);
-    let wanted = (client + frame).max(ui::layout::device_px(detail::MIN_W as i32, scale));
-    if (wanted - (wr.right - wr.left)).abs() < 2 {
+    let frame_w = (wr.right - wr.left) - (cr.right - cr.left);
+    let frame_h = (wr.bottom - wr.top) - (cr.bottom - cr.top);
+    let current_w = wr.right - wr.left;
+    let current_h = wr.bottom - wr.top;
+    let work = work_area_for(hwnd);
+    let floor = detail::min_height(scale).ceil() as i32;
+    let ceiling = (detail::max_height(scale, work.3 - work.1) as i32).max(floor);
+    let wanted_w = (client_w + frame_w).max(ui::layout::device_px(detail::MIN_W as i32, scale));
+    let wanted_h = match client_h {
+        Some(h) => (h + frame_h).clamp(floor, ceiling),
+        None => current_h,
+    };
+    let width = wanted_w.min((work.2 - work.0).max(1));
+    let height = wanted_h.min((work.3 - work.1).max(1));
+    if (width - current_w).abs() < 2 && (height - current_h).abs() < 2 {
         return;
     }
-    let placed = config::clamp_to_virtual_screen(
-        WindowState {
-            x: wr.left,
-            y: wr.top,
-            width: wanted,
-            height: wr.bottom - wr.top,
-        },
-        work_area_for(hwnd),
-        scale,
-    );
-    if placed.width == wr.right - wr.left {
-        return;
-    }
+    let x = wr.left.clamp(work.0, (work.2 - width).max(work.0));
+    let y = if wr.top + height > work.3 {
+        (work.3 - height).max(work.1)
+    } else {
+        wr.top
+    };
     unsafe {
         let _ = SetWindowPos(
             hwnd,
             None,
-            placed.x,
-            placed.y,
-            placed.width,
-            placed.height,
+            x,
+            y,
+            width,
+            height,
             SWP_NOZORDER | SWP_NOACTIVATE,
         );
     }
@@ -2805,6 +2851,7 @@ fn open_detail(panel: HWND, index: usize, point: POINT) {
                 doc,
                 scroll: 0.0,
                 content_h: 0.0,
+                height_fit: true,
                 hover: None,
             });
             s.worker.send(Command::FetchDetail {
@@ -2814,9 +2861,12 @@ fn open_detail(panel: HWND, index: usize, point: POINT) {
         }
     });
     // Measure before showing or moving: the first frame should already have the
-    // width the columns ask for, not open wide and snap in.
-    if let Some(width) = detail_wanted_width(hwnd) {
-        fit_detail_width(hwnd, width);
+    // size the document asks for, not open at the default and snap in. The
+    // height is only applied while it still follows the document, so clicking
+    // the same row again does not undo a height the user dragged.
+    let follows = State::with(|s| s.detail.as_ref().is_some_and(|p| p.height_fit)).unwrap_or(false);
+    if let Some((width, height)) = detail_wanted_size(hwnd) {
+        fit_detail_size(hwnd, width, follows.then_some(height));
     }
     place_detail_at(hwnd, point);
     unsafe {
@@ -2866,8 +2916,8 @@ unsafe extern "system" fn detail_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         }
         popup::WM_DISMISS => popup::dismiss_if_inactive(hwnd),
         WM_PAINT => {
-            if let Some(width) = paint_detail(hwnd) {
-                actions.push(Action::FitDetailWidth(width));
+            if let Some((width, height)) = paint_detail(hwnd) {
+                actions.push(Action::FitDetailSize { width, height });
             }
         }
         WM_ERASEBKGND => {}
@@ -2933,16 +2983,30 @@ unsafe extern "system" fn detail_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         WM_MOUSEWHEEL => detail_wheel(hwnd, wp, &mut actions),
         WM_KEYDOWN => detail_key(hwnd, wp, &mut actions),
         WM_GETMINMAXINFO => {
-            let scale = window_scale(hwnd);
+            // Same scale the layout uses, so the limits match what is drawn.
+            let scale = detail_scale(hwnd);
+            let work = work_area_for(hwnd);
+            let min_h = detail::min_height(scale).ceil() as i32;
             let info = unsafe { &mut *(lp.0 as *mut MINMAXINFO) };
             info.ptMinTrackSize = POINT {
-                x: (detail::MIN_W * scale) as i32,
-                y: (detail::MIN_H * scale) as i32,
+                x: ui::layout::device_px(detail::MIN_W as i32, scale),
+                y: min_h,
+            };
+            info.ptMaxTrackSize = POINT {
+                x: (work.2 - work.0).max(1),
+                y: (detail::max_height(scale, work.3 - work.1) as i32).max(min_h),
             };
             return LRESULT(0);
         }
         WM_SIZING => {
             if lp.0 != 0 {
+                // A hand drag takes the height over: later content updates and
+                // repaints must not snap it back.
+                State::with(|s| {
+                    if let Some(open) = s.detail.as_mut() {
+                        open.height_fit = false;
+                    }
+                });
                 let rect = unsafe { &mut *(lp.0 as *mut RECT) };
                 let proposed = *rect;
                 let placed = clamp_window_rect(proposed, work_area_of_rect(&proposed), hwnd);
@@ -3113,9 +3177,10 @@ fn detail_key(hwnd: HWND, wp: WPARAM, actions: &mut Vec<Action>) {
     }
 }
 
-/// Paint one popup frame. Returns the client width its columns want when that
-/// differs from the one it has, so the caller can queue a resize.
-fn paint_detail(hwnd: HWND) -> Option<i32> {
+/// Paint one popup frame. Returns the client size the document wants when that
+/// differs from the one it has, so the caller can queue a resize. The height is
+/// only included while it still follows the document.
+fn paint_detail(hwnd: HWND) -> Option<(i32, Option<i32>)> {
     let popup = detail_metrics(hwnd);
     let view_h = popup.content_view_h();
     let frame;
@@ -3159,9 +3224,34 @@ fn paint_detail(hwnd: HWND) -> Option<i32> {
         }
     });
 
-    if (frame.width - popup.width).abs() > 1.0 {
-        Some(frame.width.ceil() as i32)
-    } else {
+    // The width is fitted on every frame; the height only until the real
+    // content lands or the user drags an edge. While the width is still
+    // changing the height has to wait: wrapping — and so the content height —
+    // depends on it.
+    let width_wants = (frame.width - popup.width).abs() > 1.0;
+    let work = work_area_for(hwnd);
+    let height = if width_wants {
         None
+    } else {
+        State::with(|s| {
+            let open = s.detail.as_mut()?;
+            if !open.height_fit
+                || matches!(&open.session.detail.source, model::DetailSource::Loading)
+            {
+                return None;
+            }
+            // The document has landed: size to it once, then hold that height.
+            open.height_fit = false;
+            Some(detail::height_for_content(
+                frame.height,
+                popup.scale,
+                work.3 - work.1,
+            ))
+        })
+        .flatten()
+    };
+    if !width_wants && height.is_none() {
+        return None;
     }
+    Some((frame.width.ceil() as i32, height.map(|h| h.ceil() as i32)))
 }

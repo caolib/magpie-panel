@@ -14,7 +14,11 @@ use crate::ui::layout::Rect;
 pub const POPUP_W: f32 = 720.0;
 pub const POPUP_H: f32 = 400.0;
 pub const MIN_W: f32 = 420.0;
-pub const MIN_H: f32 = 220.0;
+/// Tallest the popup grows on its own; past this the log scrolls.
+const MAX_H: f32 = 560.0;
+/// The popup never takes more than this share of the monitor's work area, so
+/// a short screen cannot push the footer off it.
+const MAX_H_WORK_FRACTION: f32 = 0.70;
 
 const PAD: f32 = 10.0;
 const HEADER_H: f32 = 30.0;
@@ -398,6 +402,44 @@ pub fn desired_width(m: &Popup, doc: &Doc, measure: impl Fn(&str) -> f32) -> f32
         log_width(doc, m.scale, &measure),
         m,
     )
+}
+
+/// Shortest client height worth showing: the title, the footer and one
+/// unwrapped record. Replaces the old fixed minimum, which was taller than a
+/// single record and left blank space under it.
+pub fn min_height(scale: f32) -> f32 {
+    (HEADER_H + FOOTER_H + ROW_H) * scale + CELL_PAD * 4.0 * scale
+}
+
+/// Tallest client height the popup may take on `work_h` device pixels of
+/// monitor work area: `MAX_H` logical pixels, never more than
+/// `MAX_H_WORK_FRACTION` of that area. Never below [`min_height`], so a
+/// pathologically small work area cannot invert the two limits.
+pub fn max_height(scale: f32, work_h: i32) -> f32 {
+    let cap = MAX_H * scale;
+    let work = work_h.max(1) as f32 * MAX_H_WORK_FRACTION;
+    cap.min(work).max(min_height(scale))
+}
+
+/// Client height that shows `content_h` without scrolling, between the popup's
+/// own limits.
+pub fn height_for_content(content_h: f32, scale: f32, work_h: i32) -> f32 {
+    let wanted = (HEADER_H + FOOTER_H) * scale + content_h;
+    wanted.clamp(min_height(scale), max_height(scale, work_h))
+}
+
+/// Client height the document asks for at this popup's width. The caller has
+/// already fitted the width, so wrapping here matches what will be painted.
+pub fn desired_height(
+    m: &Popup,
+    doc: &Doc,
+    work_h: i32,
+    measure: impl Fn(&str) -> f32,
+    wrap: impl Fn(&str, f32) -> Vec<String>,
+) -> f32 {
+    let widths = fitted_widths(natural_widths(doc, m.scale, &measure), m.width, m.scale);
+    let table = layout(m, doc, &widths, wrap);
+    height_for_content(table.height, m.scale, work_h)
 }
 
 /// The same row-height calculation drives painting and pure geometry tests.

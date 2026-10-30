@@ -431,3 +431,81 @@ fn long_errors_wrap_inside_fixed_columns_and_rows_never_overlap() {
             .all(|v| v.rect.y + v.rect.h <= table.height)
     );
 }
+
+#[test]
+fn the_popup_height_follows_its_content_between_a_floor_and_a_ceiling() {
+    // Between the limits the document height is used as-is, chrome included.
+    assert_eq!(
+        height_for_content(200.0, 1.0, 10_000),
+        HEADER_H + 200.0 + FOOTER_H
+    );
+
+    // Title, footer and one unwrapped record: no blank space under a short log.
+    assert_eq!(height_for_content(10.0, 1.0, 10_000), min_height(1.0));
+    assert_eq!(
+        min_height(1.0),
+        HEADER_H + FOOTER_H + ROW_H + CELL_PAD * 4.0
+    );
+
+    // Long logs stop at the logical ceiling...
+    assert_eq!(height_for_content(10_000.0, 1.0, 10_000), MAX_H);
+    // ...unless the work area's share is smaller.
+    let share = height_for_content(10_000.0, 1.0, 500);
+    assert!((share - 500.0 * MAX_H_WORK_FRACTION).abs() < 0.01);
+}
+
+#[test]
+fn the_height_limits_scale_with_the_panel() {
+    assert!((min_height(2.0) - min_height(1.0) * 2.0).abs() < 0.001);
+    assert!((max_height(2.0, 10_000) - MAX_H * 2.0).abs() < 0.001);
+    let doubled = height_for_content(400.0, 2.0, 10_000);
+    assert!((doubled - (HEADER_H + FOOTER_H) * 2.0 - 400.0).abs() < 0.001);
+}
+
+#[test]
+fn a_tiny_work_area_never_inverts_the_height_limits() {
+    assert_eq!(max_height(1.0, 40), min_height(1.0));
+    assert_eq!(height_for_content(10_000.0, 1.0, 40), min_height(1.0));
+}
+
+#[test]
+fn short_records_hit_the_floor_and_long_ones_the_ceiling() {
+    // A record with no log is one line: exactly the floor, no blank space.
+    let bare = Doc {
+        rows: vec![Entry {
+            code: "200".into(),
+            provider: String::new(),
+            model: String::new(),
+            kind: String::new(),
+            log: String::new(),
+            color: theme::TEXT,
+        }],
+        notice: String::new(),
+    };
+    let m = Popup::new(MIN_W, POPUP_H, 1.0);
+    let widths = fitted_widths(natural_widths(&bare, 1.0, measure_chars), MIN_W, 1.0);
+    let table = layout(&m, &bare, &widths, wrap_chars);
+    assert_eq!(
+        height_for_content(table.height, 1.0, 10_000),
+        min_height(1.0)
+    );
+
+    // One short record with its log line sits just above the floor.
+    let short = sample_doc("short");
+    let widths = fitted_widths(natural_widths(&short, 1.0, measure_chars), MIN_W, 1.0);
+    let table = layout(&m, &short, &widths, wrap_chars);
+    let h = height_for_content(table.height, 1.0, 10_000);
+    assert_eq!(h, HEADER_H + table.height + FOOTER_H);
+    assert!(h > min_height(1.0) && h < MAX_H);
+
+    let long = sample_doc(&"长错误".repeat(5000));
+    let widths = fitted_widths(natural_widths(&long, 1.0, measure_chars), MIN_W, 1.0);
+    let table = layout(&m, &long, &widths, wrap_chars);
+    assert!(table.height > MAX_H);
+    assert_eq!(height_for_content(table.height, 1.0, 10_000), MAX_H);
+    // The public measuring path agrees with the layout it is built on.
+    assert_eq!(
+        desired_height(&m, &long, 10_000, measure_chars, wrap_chars),
+        MAX_H
+    );
+}
