@@ -45,7 +45,9 @@ pub fn latency(total_ms: Option<i64>, first_ms: Option<i64>) -> Option<String> {
 /// what a first token is measured in, so it is kept while the reading is under
 /// a minute; past that it is noise next to a number that long.
 fn seconds(ms: i64) -> String {
-    let secs = ms as f64 / 1000.0;
+    // Round to the displayed precision before choosing the unit, so `59.99s`
+    // reads `1m·00s` instead of a `60.0s` whose neighbour is `1m·00s`.
+    let secs = (ms as f64 / 100.0).round() / 10.0;
     if secs < 60.0 {
         return format!("{secs:.1}s");
     }

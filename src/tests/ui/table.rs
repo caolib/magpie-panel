@@ -233,11 +233,14 @@ fn a_latency_cell_without_a_first_token_judges_the_running_total() {
     let live = row(r#"{"model":"a","ms":130000}"#);
     // A fast first token keeps the cell calm however long the rest took.
     let long_generation = row(r#"{"model":"a","ms":200000,"ttft_ms":1000}"#);
-    let rows = [live.clone(), long_generation.clone()];
+    // Zero is a real first-token reading, not a missing one.
+    let immediate = row(r#"{"model":"a","ms":200000,"ttft_ms":0}"#);
+    let rows = [live.clone(), long_generation.clone(), immediate.clone()];
     let v = view(&rows, &[]);
     let color = |row: &Row| Column::Field(DisplayField::Latency).color(row, &v, &[], &[]);
     assert_eq!(color(&live), theme::RED);
     assert_eq!(color(&long_generation), theme::TEXT_DIM);
+    assert_eq!(color(&immediate), theme::TEXT_DIM);
 }
 
 #[test]

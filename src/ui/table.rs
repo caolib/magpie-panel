@@ -163,11 +163,7 @@ impl Column {
 /// that is the wait an operator feels. A request still in flight has no first
 /// token yet, so its running total stands in.
 fn latency_color(row: &Row) -> u32 {
-    let ms = row
-        .first_token_ms
-        .filter(|ms| *ms > 0)
-        .or(row.latency_ms)
-        .unwrap_or(0);
+    let ms = row.first_token_ms.or(row.latency_ms).unwrap_or(0);
     if ms >= LATENCY_CRITICAL_MS {
         theme::RED
     } else if ms >= LATENCY_SLOW_MS {

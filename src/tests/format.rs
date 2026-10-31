@@ -66,6 +66,9 @@ fn latency_keeps_tenths_only_while_seconds_read_better() {
     // ...past it the reading turns into minutes, seconds rounded.
     assert_eq!(latency(Some(190_400), None).as_deref(), Some("[3m·10s]"));
     assert_eq!(latency(Some(60_000), None).as_deref(), Some("[1m·00s]"));
+    // A reading that rounds to 60.0s is already a minute.
+    assert_eq!(latency(Some(59_999), None).as_deref(), Some("[1m·00s]"));
+    assert_eq!(latency(Some(59_949), None).as_deref(), Some("[59.9s]"));
     // And hours once minutes stop being readable.
     assert_eq!(latency(Some(3_725_000), None).as_deref(), Some("[1h·02m]"));
 }

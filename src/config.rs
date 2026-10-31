@@ -279,7 +279,7 @@ impl DisplayField {
             DisplayField::Speed => "速度 · tps",
             DisplayField::Retry => "重试次数",
             DisplayField::Cost => "费用 · 估算",
-            DisplayField::Latency => "耗时 · [首字·总]",
+            DisplayField::Latency => "耗时 · [首字|总]",
             DisplayField::Completion => "补全 · 输出词元",
             DisplayField::Source => "来源 · 入口与主机",
             DisplayField::Error => "错误 · HTTP 状态码",
