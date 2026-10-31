@@ -2,7 +2,10 @@
 name = "magpie-panel"
 version = "0.3.0"
 edition = "2024"
+rust-version = "1.88"
 description = "Floating desktop panel showing live Magpie gateway requests"
+license = "MIT"
+repository = "https://github.com/caolib/magpie-panel"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

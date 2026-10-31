@@ -49,7 +49,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          sha256sum target/release/magpie-panel.exe > SHA256SUMS.txt
           gh release create "${GITHUB_REF_NAME}" \
             target/release/magpie-panel.exe \
+            SHA256SUMS.txt \
             --title "${GITHUB_REF_NAME}" \
             --generate-notes
