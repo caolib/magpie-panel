@@ -1,75 +1,58 @@
 # CLAUDE.md
 
-This file provides guidance to CodeBuddy Code when working with code in this repository.
+本文件面向在此仓库工作的编码代理，只记录从代码不易直接看出、但会改变做法的约定。
 
-## 构建、运行与测试
+## 平台与命令
 
-本仓库是纯 Windows 二进制 crate，依赖 `windows` 0.62（GDI+ / GDI / DPAPI / Win32 消息循环）。**只能在 Windows 上编译和运行**。
+纯 Windows 二进制 crate，依赖 `windows` 0.62 的 GDI+/GDI、DPAPI 和 Win32 消息循环；只能在 Windows 上编译和运行。Rust 1.88+（edition 2024）。
 
 ```bash
-cargo run --release          # 运行（首次启动自动创建本机连接）
-cargo build --release        # 仅构建；产物在 target/release/magpie-panel.exe
-cargo test                   # 跑全部内置测试
-cargo test --bin magpie-panel <过滤>   # 例：cargo test --bin magpie-panel model:: 只跑某模块
-cargo clippy --all-targets   # 代码质量检查（需已装 clippy）
-cargo fmt                    # 格式化
+cargo run --release
+cargo test --locked
+cargo test --locked --bin magpie-panel model::   # 只跑一个模块
+cargo clippy --locked --all-targets -- -D warnings
+cargo fmt -- --check
 ```
 
-测试集中放在 `src/tests/`：`src/tests/*.rs` 对应根模块，`src/tests/ui/*.rs` 对应 UI 模块，源文件里以 `#[cfg(test)] #[path = ...] mod tests;` 引用。测试仍是各模块的子模块（`use super::*` 照旧），所以能访问私有函数。无 `dev-dependencies`，纯 std，`cargo test` 直接跑。注意 `Worker::run` 涉及真实网络，测试只覆盖纯逻辑（解析、布局、格式、配置）。
+- 运行中的面板会锁住 `target/release/magpie-panel.exe`；构建 release 前先正常关闭它。
+- `[profile.release]` 追求体积：`opt-level="z"`、`lto`、`panic="abort"`、`strip`。改 profile 前先确认体积影响。
+- 测试在 `src/tests/`，源文件用 `#[cfg(test)] #[path = ...] mod tests;` 挂载；测试仍是模块子项，可访问私有函数。只覆盖纯逻辑（解析、布局、格式、配置）；`Worker::run` 走真实网络，不在测试内。
+- CI 在 `.github/workflows/ci.yml` 跑 fmt、clippy、test。
 
-`Cargo.toml` 的 `[profile.release]` 设了 `opt-level="z"`、`lto=true`、`panic="abort"`、`strip=true`——发布构建体积敏感，改 profile 需谨慎。
+## 数据与配置
 
-## 配置与数据位置
+- 配置：`%APPDATA%\magpie-panel\config.json`，首次运行生成。
+- 网关密钥：`%APPDATA%\magpie-panel\credentials.bin`，DPAPI 加密并绑定当前用户。`accounts` 只存 id/名称/地址。
+- `MAGPIE_PANEL_HOME` 覆盖整个存储目录（`config::base_dir`）；`AH_PANEL_HOME` 仍兼容。新目录没有配置/密钥时沿用 `%APPDATA%\ah-panel`，不搬移、不覆盖。
+- `accounts` 是实际轮询的连接；顶层 `endpoint` 是首次安装和新增连接表单的默认地址。环境变量 `MAGPIE_GATEWAY_KEY`（名字由 `gatewayKeyEnvVar` 改）只覆盖第一条连接，并优先于该连接保存的密钥。
+- `pollSeconds` / `activePollSeconds`（默认 5 / 2）只能改配置后重启，设置窗口没有。`period`（默认 `30d`）同样只改配置，决定 usage 窗口。
+- `rowLimit` 随窗口高度重算。
 
-- 配置：`%APPDATA%\magpie-panel\config.json`，首次运行自动生成（`config.rs`）。
-- 网关密钥（DPAPI 加密，绑定当前用户）：`%APPDATA%\magpie-panel\credentials.bin`。配置里只存非敏感的 `accounts`（id/名称/地址）。
-- 用环境变量 `MAGPIE_PANEL_HOME` 可整体覆盖该目录（`config::base_dir`），用于指向不同 profile 或本地测试；旧变量 `AH_PANEL_HOME` 仍兼容。新目录无配置/密钥时继续使用 `%APPDATA%\ah-panel` 旧资料，不搬移或覆盖。
-- 刷新间隔由 `pollSeconds`（空闲，默认 5）和 `activePollSeconds`（有请求 in flight，默认 2）控制，**设置窗口里没有这一项**，只能改 `config.json` 后重启。
-- `period` 决定 `/v1/magpie/usage/requests` 的时间窗口（`today` / `7d` / `30d` / `all` / `last:24h` / `YYYY-MM-DD..YYYY-MM-DD`），同样只能改配置。
+## 线程与状态
 
-## 高层架构
+- UI 线程跑 Win32 消息循环（`main.rs`）；`magpie-panel-poll` 线程跑网络轮询（`worker.rs::run`）；`magpie-panel-detail` 线程用容量 1 的队列串行加载详情。三者用 mpsc 解耦。
+- 主 → worker：`Worker::send(Command)`；worker → 主：`Worker::drain()` 非阻塞拉取自上次的全部 `Update`。
+- UI 的 `TIMER_POLL` 每 250ms 调 `pump_worker`：drain → `State::with` 应用 → 必要时 `Action::Redraw`。网络轮询间隔由 worker 自己按 config + 退避计算（失败 2s → 30s），与这个 UI 节拍无关。`TIMER_CLOCK` 每秒重绘相对时间。
+- 全部状态在 UI 线程的 `thread_local! RefCell<Option<State>>`（`app`、`worker`、`fonts`、`detail`、`settings`、`scale` 等），经 `State::with(|s| ...)` 修改。`State` 只属于 UI 线程。
+- 窗口过程不直接调用 `SetWindowPos` / `DestroyWindow` / 模态弹窗等会泵消息的 Win32 API：它们可能在持有 `RefCell` 借用时重入并触发 `RefCell already borrowed`。把意图压进 `Vec<Action>`，释放借用后由 `run_actions` 执行；Action 可继续压 Action。
+- `Action::Redraw` 只作用于发起它的 `hwnd`；`pump_worker` 在详情弹窗打开时要额外 `invalidate(popup_hwnd)`。detail / settings 是独立窗口，但共用同一个 `State`。
+- 详情回包用 `DetailTicket` 的 nonce、`targets_revision`、endpoint 和原始行 `DetailIdentity` 一起校验；连接或凭据编辑会推进 revision，迟到回包必须丢弃。
 
-### 1. 线程模型与数据流（双通道解耦）
+## 绘制
 
-单条 UI 线程跑 Win32 消息循环（`main.rs`）；另一条 `magpie-panel-poll` 线程跑网络轮询（`worker.rs::run`，由 `Worker::spawn` 起）。两者用两个 `mpsc` 通道解耦，互不阻塞：
+- `WM_PAINT` 经 `with_double_buffer` 画到离屏位图后一次 `BitBlt`，避免闪烁。
+- 布局集中在 `ui/layout.rs`（纯函数、可测），按显示器物理像素密度缩放，而不是系统缩放；`config.window` 存 96 DPI 逻辑单位（`logicalWindow`）。`WM_DPICHANGED` 只处理系统 DPI 变化，跨屏密度变化由 `WM_MOVE` 侦测。
+- 中英文混排由 `theme.rs::split_runs` 按字形来源分段，分别用拉丁/CJK 字体测量和绘制。
+- 表格没有表头；第一列是状态圆点。列宽取当前页每列最长文本的实测宽度，空列自动隐藏，窗口宽度跟随列宽。
+- 详情弹窗最大宽度 1080 物理像素，日志超长时在弹窗内换行。
 
-- 主 → worker：`Worker::send(Command)`，命令如 `RefreshNow` / `SetTargets` / `FetchDetail` / `CancelDetail` / `SetRowLimit` / `TestAccount` / `Shutdown`。
-- worker → 主：`Worker::drain()`，**非阻塞**拉取自上次的全部 `Update`（`Snapshot` / `Accounts` / `Detail` / `Probe`）。
-- `magpie-panel-detail` 独立线程通过容量为 1 的队列加载详情，慢请求不阻塞轮询；`DetailTicket` 的 nonce、目标 revision、endpoint 与原始行身份一起拒绝迟到回包。
+## 数据流与 Magpie 语义
 
-UI 线程上每 200ms 的 `WM_TIMER`（定时器 id `TIMER_POLL`）触发 `pump_worker`：`drain()` 取出 Update → 经 `State::with` 应用到 `App` → 把 `Action::Redraw` 压入待执行队列。**真正的网络轮询间隔由 worker 自己按 config + backoff 计算**，和这 200ms 的 UI 同步节拍是两回事。
-
-### 2. 全局可变状态 `State`
-
-整个面板状态装在一个 `thread_local! RefCell<Option<State>>`，结构见 `main.rs`：`app`（面板数据）、`worker`、`fonts`、`detail`（详情弹窗，至多一个）、`settings` / `settings_login`（设置窗口往返）、`activatable`、`scale`（绘制缩放比）。所有窗口过程都通过 `State::with(|s| ...)` 借 `&mut` 改状态。因为是单 UI 线程，`RefCell` 是安全的——不要试图把 `State` 搬到别的线程。
-
-### 3. 副作用延迟执行：Action 机制
-
-`SetWindowPos` / `DestroyWindow` / 模态弹窗这类 Win32 调用会泵消息、重入窗口过程，若在持有 `RefCell` 借用时调用会触发 `RefCell already borrowed`。所以窗口过程**不直接**执行这些副作用，而是把意图收集进 `Vec<Action>`，在释放状态借用之后由 `run_actions` 统一执行。Action 还能链式再压 Action（drain 用 `while let Some ... pop`）。任何新增会触发窗口/进程级副作用的逻辑，都应走 `Action`，不要就地调用 Win32。
-
-### 4. 绘制管线：双缓冲 + 物理 DPI 缩放
-
-- `WM_PAINT` 经 `with_double_buffer` 先画到离屏位图再一次性 `BitBlt`，避免闪烁。
-- 布局计算集中在 `ui/layout.rs`（纯函数、可测），按**显示器物理像素密度**（EDID，非系统缩放）缩放；窗口尺寸以 96 DPI 逻辑单位保存（`config.window` + `logicalWindow`），故跨屏观感大小一致，`WM_DPICHANGED` 只在系统 DPI 变化时触发，跨屏密度不同由 `WM_MOVE` 单独侦测。
-- 中英文混排由 `theme.rs` 的 `split_runs` 分段绘制（中文缺字形时回退字体）。
-- 表格列宽由 `ui/table.rs` 实测每列最长文本得出；没有表头行，状态列是彩色圆点，`流`/`转`/`透` 标记列由颜色表达。
-
-### 5. 数据模型与显示
-
-- `model.rs` 把 Magpie 的 usage / concurrency 响应转成 `Row`，是表格、筛选和详情弹窗共享的数据结构。
-- `app.rs` 持有原始行（wire 模型名），在 `rebuild()` 里统一应用模型缩写、状态筛选、关键词搜索和行数上限。筛选与搜索都是**纯本地**的，不向 worker 发命令。
-- `client.rs` 轮询 `/v1/magpie/usage/requests` 与 `/v1/magpie/concurrency`；详情在显式回环地址优先查 `/v1/magpie/trace`，不可用时以 `usage/requests?period=all&route=...` 补查历史摘要。远程用网关密钥（`Authorization: Bearer`），不探测独立控制台端口。
-- 详情仅显示状态码、供应商、模型、错误日志四列，按尝试顺序保留失败和最终结果；历史摘要可能不完整，加载/权限/分页限制需明确提示。主表格错误列仅显示状态码，长日志只在详情换行显示。
-
-### 6. 认证约束（易踩坑）
-
-Magpie 是本地网关：默认 `http://127.0.0.1:3425`，回环访问**不需要密钥**。只有网关被共享到网络外时才需要 Magpie gateway key；受限的 key 可能拒绝 `/concurrency`，此时应视为「没有进行中请求」，而不是连接失败。没有 JWT、refresh token、账号密码或 API key 换 JWT 之类的机制——不要重新引入。
-
-## 跨文件陷阱 / 注意点
-
-- **serde 字段命名**：Magpie 的 wire 字段是 snake_case（`cache_read`、`first_text_ms`、`handed_on`、`route_id`），但少数显示名是 camelCase（`agentName`、`providerName`、`providerAccount`、`providerKeyName`），必须显式 `#[serde(rename = ...)]`；`in` 是 Rust 关键字，也要 rename。新增字段时逐个核对原始 JSON，不要依赖 `rename_all`。
-- **token 语义**：`in` 不含缓存读写，`cache_read` / `cache_write` 单列；`out` 已含 `reasoning`，聚合时不要再加一次。`cost` 仅在 `priced: true` 时展示。
-- **没有全网关唯一的请求 id**：行 id 是合成的（`t` + `rid` / `live:<route>` 等），不要假设它能跨轮询稳定匹配；详情按原始字段构成的 `DetailIdentity` 匹配，不使用映射后的显示名。
-- **两层定时器**：200ms 的 `TIMER_POLL` 只负责把 worker 结果同步进 `State` 并触发重绘；网络轮询间隔由 worker 自管。改刷新频率别动 UI 定时器，改 `config` 的 `pollSeconds` / `activePollSeconds`。
-- **弹窗共享 State**：detail / settings 是独立窗口但都通过同一个 `State::with` 访问状态。`Action::Redraw` 只作用于发起它的那个 `hwnd`，所以 `pump_worker` 在 `Popup` 打开时会额外 `invalidate(popup_hwnd)`，否则弹窗不会刷新。
-- **运行中的 exe 会锁住 release 构建**：改完代码想 `cargo build --release` 前，先把正在跑的 `magpie-panel.exe` 关掉，否则 Windows 文件锁会导致链接失败。
+- `model.rs` 把 usage/concurrency 响应转成 `Row`，表格、筛选和详情共用。`app.rs` 保留原始行，在 `rebuild()` 里统一应用显示名缩写、状态筛选、关键词搜索和 `rowLimit`；筛选与搜索纯本地。worker 每次拉 100–500 条供本地过滤。
+- 显示名缩写只影响展示；详情匹配用原始字段构成的 `DetailIdentity`，不要用映射后的名字。
+- `client.rs` 轮询 `/v1/magpie/usage/requests` 与 `/v1/magpie/concurrency`。详情在显式回环地址优先查 `/v1/magpie/trace`；不可用时用 `usage/requests?period=all&route=...` 补查历史摘要（最多 4 页 × 500 条），并明确提示可能不完整。
+- 详情只显示状态码、供应商、模型、类型、错误日志五列，按尝试顺序保留失败与最终结果；不读取请求/响应正文，不探测独立控制台端口。主表格错误列只显示状态码，长日志只在详情换行。
+- 认证：回环地址免密钥；远程只接受可选的 `Authorization: Bearer <gateway key>`。受限密钥拒绝 `/concurrency` 时视为「没有进行中请求」，不是连接失败。没有 JWT、refresh token、账号密码或 API key 换 JWT 的机制。
+- Magpie wire 字段是 snake_case（`cache_read`、`first_text_ms`、`handed_on`、`route_id`），少数显示名是 camelCase（`agentName`、`providerName`、`providerAccount`、`providerKeyName`），逐个显式 `#[serde(rename = ...)]`；`in` 是 Rust 关键字，也要 rename。新增字段时对照原始 JSON，不要依赖 `rename_all`。
+- token：`in` 不含缓存读写，`cache_read` / `cache_write` 单列；`out` 已含 `reasoning`，不要再加一次。`cost` 只在 `priced: true` 时展示。
+- 没有全网关唯一请求 id：行 id 由 `t`、`agent`、`model`、`rid`、`session` 合成（进行中为 `live:<route>`），不要假设跨轮询稳定；详情按 `DetailIdentity` 匹配。
