@@ -2728,7 +2728,9 @@ fn fit_detail_size(hwnd: HWND, client_w: i32, client_h: Option<i32>) {
     let work = work_area_for(hwnd);
     let floor = detail::min_height(scale).ceil() as i32;
     let ceiling = (detail::max_height(scale, work.3 - work.1) as i32).max(floor);
-    let wanted_w = (client_w + frame_w).max(ui::layout::device_px(detail::MIN_W as i32, scale));
+    let min_w = ui::layout::device_px(detail::MIN_W as i32, scale);
+    let max_w = (detail::MAX_W as i32).max(min_w);
+    let wanted_w = (client_w + frame_w).clamp(min_w, max_w);
     let wanted_h = match client_h {
         Some(h) => (h + frame_h).clamp(floor, ceiling),
         None => current_h,
@@ -2987,13 +2989,13 @@ unsafe extern "system" fn detail_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             let scale = detail_scale(hwnd);
             let work = work_area_for(hwnd);
             let min_h = detail::min_height(scale).ceil() as i32;
+            let min_w = ui::layout::device_px(detail::MIN_W as i32, scale);
             let info = unsafe { &mut *(lp.0 as *mut MINMAXINFO) };
-            info.ptMinTrackSize = POINT {
-                x: ui::layout::device_px(detail::MIN_W as i32, scale),
-                y: min_h,
-            };
+            info.ptMinTrackSize = POINT { x: min_w, y: min_h };
             info.ptMaxTrackSize = POINT {
-                x: (work.2 - work.0).max(1),
+                x: (detail::MAX_W as i32)
+                    .max(min_w)
+                    .min((work.2 - work.0).max(1)),
                 y: (detail::max_height(scale, work.3 - work.1) as i32).max(min_h),
             };
             return LRESULT(0);

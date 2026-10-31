@@ -287,13 +287,10 @@ fn first_line_fields_fit_their_text_and_narrow_windows_shrink_them() {
     assert_eq!(natural[2], measure_chars("m") + CELL_PAD * 2.0);
     assert_eq!(natural[3], CELL_PAD * 2.0);
 
-    // The log no longer owns a column: it only caps how wide the popup may get.
-    assert_eq!(log_width(&doc, 1.0, measure_chars), MAX_LOG_W);
+    // The log no longer owns a column: it only drives the width up to the cap.
+    assert!(log_width(&doc, measure_chars) > MAX_W);
     let narrow = Popup::new(MIN_W, POPUP_H, 1.0);
-    assert_eq!(
-        desired_width(&narrow, &doc, measure_chars),
-        MAX_LOG_W + PAD * 2.0
-    );
+    assert_eq!(desired_width(&narrow, &doc, measure_chars), MAX_W);
 
     // Narrower than the fields need: they shrink together.
     let wide_fields = [300.0f32; 4];
@@ -302,6 +299,54 @@ fn first_line_fields_fit_their_text_and_narrow_windows_shrink_them() {
     assert!((total - MIN_W).abs() < 0.01);
     // Wider: the fields keep their own width and the rest stays blank.
     assert_eq!(fitted_widths(natural, 2000.0, 1.0), natural);
+}
+
+#[test]
+fn fractional_font_metrics_keep_short_models_on_one_line() {
+    let mut doc = sample_doc("short");
+    doc.rows[0].model = "gpt-6.1-sol".into();
+    // Real GDI+ measurements for the default mono face at these scales.
+    for (scale, model_w) in [(1.5, 117.667), (2.04, 160.02708), (3.0, 235.334)] {
+        let measure = |text: &str| {
+            if text == "gpt-6.1-sol" {
+                model_w
+            } else if text.is_empty() {
+                0.0
+            } else {
+                // GDI+ includes an overhang allowance on each measurement.
+                measure_chars(text) * scale + 4.0 * scale
+            }
+        };
+        let m = Popup::new(MIN_W * scale, POPUP_H * scale, scale);
+        let widths = fitted_widths(natural_widths(&doc, scale, measure), m.width, scale);
+        let table = layout(&m, &doc, &widths, |text, width| {
+            theme::wrap_by(text, width, measure)
+        });
+        let model = table
+            .visuals
+            .iter()
+            .find(|v| v.text == "gpt-6.1-sol")
+            .unwrap_or_else(|| panic!("model wrapped at scale {scale}"));
+        let code = table.visuals.iter().find(|v| v.text == "502").unwrap();
+        assert_eq!(model.rect.y, code.rect.y);
+        assert!(model.rect.w >= model_w);
+        assert_eq!(table.bands[0].h, (ROW_H + CELL_PAD) * 2.0 * scale);
+    }
+}
+
+#[test]
+fn the_popup_width_is_capped_at_1080_device_pixels() {
+    let mut doc = sample_doc("short");
+    doc.rows[0].model = "m".repeat(40);
+    let measure = |text: &str| text.chars().count() as f32 * 100.0;
+    let m = Popup::new(MIN_W, POPUP_H, 1.0);
+    assert_eq!(desired_width(&m, &doc, measure), MAX_W);
+    assert_eq!(MAX_W, 1080.0);
+
+    // A narrow monitor still wins over the cap; the caller clamps to its work
+    // area after this.
+    let natural = [300.0; 4];
+    assert_eq!(width_of(&natural, 5000.0, &m), MAX_W);
 }
 
 #[test]
@@ -350,7 +395,7 @@ fn failure_type_gets_its_own_column_and_the_log_keeps_the_prose() {
 fn the_log_starts_a_new_line_below_the_fields_without_indent() {
     let doc = sample_doc("first\nsecond");
     let widths = fitted_widths(natural_widths(&doc, 1.0, measure_chars), MIN_W, 1.0);
-    for width in [MIN_W, MAX_LOG_W + PAD * 2.0 + 100.0] {
+    for width in [MIN_W, MAX_W] {
         let m = Popup::new(width, POPUP_H, 1.0);
         let table = layout(&m, &doc, &widths, wrap_chars);
         let find = |text: &str| {

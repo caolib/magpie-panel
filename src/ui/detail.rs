@@ -29,8 +29,10 @@ const COLUMN_GAP: f32 = 8.0;
 const BUTTON_H: f32 = 22.0;
 const CLOSE_W: f32 = 22.0;
 const COPY_W: f32 = 52.0;
-/// A log line longer than this wraps instead of widening the popup.
-pub const MAX_LOG_W: f32 = 480.0;
+/// Widest the popup is allowed to grow, in device pixels. Longer logs wrap
+/// instead of widening it; a narrow monitor's work area can only make it
+/// smaller.
+pub const MAX_W: f32 = 1080.0;
 const HEADERS: [&str; 5] = ["状态码", "供应商", "模型", "类型", "错误日志"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -342,20 +344,22 @@ fn natural_widths(doc: &Doc, scale: f32, measure: impl Fn(&str) -> f32) -> [f32;
         }
     }
     for width in &mut widths {
-        *width += CELL_PAD * 2.0 * scale;
+        // Round up: `layout` later subtracts the cell padding again, and in f32
+        // the subtraction can land a hair below the measured text, wrapping a
+        // model name that fits.
+        *width = (*width + CELL_PAD * 2.0 * scale).ceil();
     }
     widths
 }
 
-/// Widest log line, capped: past the cap the log wraps rather than widening the
-/// popup further.
-fn log_width(doc: &Doc, scale: f32, measure: impl Fn(&str) -> f32) -> f32 {
+/// Widest log line. It only has to be measured until the popup reaches its
+/// width cap; the line wraps once the width stops growing.
+fn log_width(doc: &Doc, measure: impl Fn(&str) -> f32) -> f32 {
     doc.rows
         .iter()
         .flat_map(|row| row.log.split('\n'))
         .map(&measure)
         .fold(0.0f32, f32::max)
-        .min(MAX_LOG_W * scale)
 }
 
 /// The widths the first line's columns are drawn at. A window narrower than
@@ -388,18 +392,19 @@ fn column_rects(m: &Popup, widths: &[f32; 4]) -> [Rect; 4] {
 }
 
 /// Client width the document asks for: the first-line fields, or the longest
-/// log line up to its cap, floored at `MIN_W`.
+/// log line up to its cap, floored at `MIN_W` and capped at [`MAX_W`].
 fn width_of(natural: &[f32; 4], log: f32, m: &Popup) -> f32 {
     let columns = m.pad() * 2.0 + natural.iter().sum::<f32>() + COLUMN_GAP * 3.0 * m.scale;
     let log = m.pad() * 2.0 + log;
-    columns.max(log).max(MIN_W * m.scale)
+    let floor = MIN_W * m.scale;
+    columns.max(log).max(floor).min(MAX_W.max(floor))
 }
 
 /// Client width the document asks for. Callers clamp it to the monitor.
 pub fn desired_width(m: &Popup, doc: &Doc, measure: impl Fn(&str) -> f32) -> f32 {
     width_of(
         &natural_widths(doc, m.scale, &measure),
-        log_width(doc, m.scale, &measure),
+        log_width(doc, &measure),
         m,
     )
 }
@@ -616,7 +621,7 @@ pub fn draw(p: &Painter, fonts: &Fonts, m: &Popup, v: &View) -> Frame {
     }
     let measure = |text: &str| p.dual_measure(&fonts.small, text);
     let natural = natural_widths(v.doc, m.scale, measure);
-    let width = width_of(&natural, log_width(v.doc, m.scale, measure), m);
+    let width = width_of(&natural, log_width(v.doc, measure), m);
     let widths = fitted_widths(natural, m.width, m.scale);
     let table = layout(m, v.doc, &widths, |text, inner| {
         p.wrap(&fonts.small, text, inner)
