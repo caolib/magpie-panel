@@ -143,6 +143,30 @@ fn active_requests_are_live_and_carry_the_client_model() {
 }
 
 #[test]
+fn active_requests_preserve_effort_and_tolerate_older_feeds() {
+    for (effort, expected) in [
+        ("high", Some("high")),
+        (" low ", Some("low")),
+        ("", None),
+        ("  ", None),
+    ] {
+        let active: ActiveRequest = serde_json::from_value(serde_json::json!({
+            "route": 9, "model": "gpt-5", "effort": effort
+        }))
+        .unwrap();
+        let row = Row::from_active(&active);
+        assert!(row.live);
+        assert_eq!(row.reasoning_effort.as_deref(), expected);
+        assert_eq!(
+            row.display_model(),
+            expected.map_or_else(|| "gpt-5".into(), |s| format!("gpt-5({s})"))
+        );
+    }
+    let active: ActiveRequest = serde_json::from_str(r#"{"route":9,"model":"gpt-5"}"#).unwrap();
+    assert_eq!(Row::from_active(&active).reasoning_effort, None);
+}
+
+#[test]
 fn routed_models_are_bracketed_and_carry_their_effort() {
     let row = Row::from_record(&record(FULL));
     assert!(row.is_routed());

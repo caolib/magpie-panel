@@ -249,6 +249,25 @@ fn model_colours_distinguish_efforts_but_not_routing_brackets() {
 }
 
 #[test]
+fn live_and_finished_models_share_effort_colour_identity() {
+    let active: crate::model::ActiveRequest =
+        serde_json::from_str(r#"{"model":"A","effort":"high","route":7}"#).unwrap();
+    let rows = vec![
+        Row::from_active(&active),
+        row(r#"{"model":"A","effort":"high"}"#, "a1"),
+        row(r#"{"model":"A","effort":"low"}"#, "a1"),
+    ];
+    assert_eq!(model_color_key(&rows[0]), model_color_key(&rows[1]));
+    assert_eq!(
+        model_palette(&rows, NameColorTheme::Classic),
+        vec![
+            (("A", Some("low")), NAME_PALETTE[0]),
+            (("A", Some("high")), NAME_PALETTE[1]),
+        ]
+    );
+}
+
+#[test]
 fn name_palette_overflow_does_not_reuse_category_colours() {
     for theme in NameColorTheme::ALL {
         let palette = name_palette(theme);

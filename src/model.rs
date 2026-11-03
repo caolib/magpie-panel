@@ -449,6 +449,50 @@ pub struct Concurrency {
     pub active: Vec<ActiveRequest>,
 }
 
+/// Only the trace metadata needed to enrich live rows; no logs or bodies.
+#[derive(Default, Deserialize)]
+pub struct LiveTracePage {
+    #[serde(default)]
+    pub routes: Vec<LiveRoute>,
+}
+
+#[derive(Default, Deserialize)]
+pub struct LiveRoute {
+    pub id: i64,
+    #[serde(default)]
+    pub time: Option<String>,
+    #[serde(default)]
+    pub session: Option<String>,
+    #[serde(default)]
+    pub agent: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+}
+
+impl LiveRoute {
+    pub fn matches(&self, active: &ActiveRequest) -> bool {
+        if active.route.filter(|id| *id > 0) != Some(self.id)
+            || !same_instant(self.time.as_deref(), active.started.as_deref())
+        {
+            return false;
+        }
+        for (expected, actual) in [
+            (active.session.as_deref(), self.session.as_deref()),
+            (active.agent.as_deref(), self.agent.as_deref()),
+            (active.model.as_deref(), self.model.as_deref()),
+        ] {
+            if let Some(expected) = expected.filter(|s| !s.trim().is_empty())
+                && actual != Some(expected)
+            {
+                return false;
+            }
+        }
+        true
+    }
+}
+
 /// One in-flight request. Field names are the client's, not the upstream
 /// model's: `model` is what the agent asked for, `provider` the initial route.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -461,6 +505,8 @@ pub struct ActiveRequest {
     pub started: Option<String>,
     #[serde(default)]
     pub ms: Option<i64>,
+    #[serde(default)]
+    pub effort: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
@@ -682,7 +728,7 @@ impl Row {
             agent: non_empty(active.agent.as_deref()),
             host: None,
             endpoint: None,
-            reasoning_effort: None,
+            reasoning_effort: non_empty(active.effort.as_deref()),
             tries: 0,
             handed_on: false,
             route_id: active.route,

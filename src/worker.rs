@@ -4,9 +4,9 @@
 //! values that the UI applies from its own timer, so painting never blocks on a
 //! socket and the panel stays responsive when a gateway is slow or unreachable.
 //!
-//! Each poll is two reads: the usage log (finished requests) and the
-//! concurrency feed (live ones). Finished rows keep Magpie's own semantics;
-//! live rows are merged with them, then sorted by the UI's display settings.
+//! Each poll reads the usage log and concurrency feed. Local live requests
+//! missing effort can also read bounded trace metadata. Finished rows keep
+//! Magpie's semantics; the UI sorts the merged rows by its display settings.
 
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
@@ -18,6 +18,8 @@ use tracing::warn;
 
 /// Upper bound on a usage query before the panel gives up on it.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
+/// Optional live metadata must not add a full request timeout to every poll.
+const LIVE_METADATA_TIMEOUT: Duration = Duration::from_secs(2);
 /// Longest sleep, so queued commands are noticed promptly without spinning.
 const TICK: Duration = Duration::from_millis(200);
 /// Rows fetched per poll before the local status filter and row limit are
@@ -262,6 +264,7 @@ fn run(
     updates: Sender<Update>,
 ) {
     let client = Client::new(REQUEST_TIMEOUT);
+    let live_metadata = Client::new(LIVE_METADATA_TIMEOUT);
     // A single bounded detail lane reuses the configured Agent. Slow detail
     // reads cannot postpone poll/probe work; no per-click thread spawning.
     let (detail_tx, detail_rx) =
@@ -349,7 +352,12 @@ fn run(
                         // The live feed is best-effort: a restricted key is
                         // refused it, and that is not a connection failure.
                         match client.concurrency(&target.endpoint, target.key.as_deref()) {
-                            Ok(active) => {
+                            Ok(mut active) => {
+                                live_metadata.enrich_live_efforts(
+                                    &target.endpoint,
+                                    target.key.as_deref(),
+                                    &mut active,
+                                );
                                 rows.extend(
                                     active
                                         .iter()

@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 use tracing::warn;
 
 use crate::model::{
-    ActiveRequest, Attempt, Concurrency, DetailSource, ExecutionDetail, Row, TracePage, UsagePage,
-    UsageRecord, history_anchor,
+    ActiveRequest, Attempt, Concurrency, DetailSource, ExecutionDetail, LiveTracePage, Row,
+    TracePage, UsagePage, UsageRecord, history_anchor,
 };
 
 const MAX_JSON_BYTES: u64 = 8 * 1024 * 1024;
@@ -94,6 +94,22 @@ impl Client {
         let url = format!("{}/v1/magpie/concurrency", endpoint.trim_end_matches('/'));
         let page: Concurrency = self.get_json(&url, key)?;
         Ok(page.active)
+    }
+
+    /// Best-effort effort metadata from the same explicit loopback gateway.
+    /// Failure never discards the concurrency rows or changes connection health.
+    pub fn enrich_live_efforts(
+        &self,
+        endpoint: &str,
+        key: Option<&str>,
+        active: &mut [ActiveRequest],
+    ) {
+        load_live_efforts(endpoint, active, || {
+            self.get_json::<LiveTracePage>(
+                &format!("{}/v1/magpie/trace", endpoint.trim_end_matches('/')),
+                key,
+            )
+        });
     }
 
     /// A bounded detail round trip. Failures are data for the popup, never
@@ -189,6 +205,43 @@ fn is_loopback(endpoint: &str) -> bool {
             .trim_matches(['[', ']'])
             .parse::<std::net::IpAddr>()
             .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// No extra read for remote gateways, empty feeds, known efforts or unusable ids.
+fn load_live_efforts(
+    endpoint: &str,
+    active: &mut [ActiveRequest],
+    trace: impl FnOnce() -> Result<LiveTracePage, ApiError>,
+) {
+    let needs_effort = |request: &ActiveRequest| {
+        request
+            .effort
+            .as_deref()
+            .is_none_or(|s| s.trim().is_empty())
+            && request.route.is_some_and(|id| id > 0)
+            && request
+                .started
+                .as_deref()
+                .and_then(crate::time::parse_unix)
+                .is_some()
+    };
+    if !is_loopback(endpoint) || !active.iter().any(needs_effort) {
+        return;
+    }
+    let Ok(page) = trace() else { return };
+    for request in active.iter_mut().filter(|r| needs_effort(r)) {
+        let mut matches = page.routes.iter().filter(|route| route.matches(request));
+        if let Some(route) = matches.next()
+            && matches.next().is_none()
+        {
+            request.effort = route
+                .effort
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+        }
+    }
 }
 
 /// Transport injection keeps identity, failure and paging tests offline.
@@ -357,6 +410,130 @@ mod tests {
         let record: UsageRecord = serde_json::from_str(r#"{"t":"2026-10-20T09:00:00Z","session":"s","agent":"cli","model":"m","provider":"p","route_id":7,"status":200,"tries":3}"#).unwrap();
         let row = Row::from_record(&record).with_account("a1", "one");
         (record, row)
+    }
+
+    fn live_request() -> ActiveRequest {
+        serde_json::from_str(r#"{"route":7,"started":"2026-10-20T09:00:00Z","session":"s","agent":"cli","model":"m"}"#).unwrap()
+    }
+
+    fn live_trace() -> serde_json::Value {
+        serde_json::json!({"routes":[{
+            "id":7,"time":"2026-10-20T09:00:00Z","session":"s","agent":"cli","model":"m","effort":" high "
+        }]})
+    }
+
+    #[test]
+    fn local_trace_enriches_live_effort_without_overwriting_the_feed() {
+        for endpoint in [
+            "http://localhost:3425",
+            "http://127.0.0.1:3425",
+            "http://[::1]:3425",
+        ] {
+            let mut known = live_request();
+            known.effort = Some("low".into());
+            let mut active = vec![live_request(), known];
+            load_live_efforts(endpoint, &mut active, || {
+                Ok(serde_json::from_value(live_trace()).unwrap())
+            });
+            assert_eq!(active[0].effort.as_deref(), Some("high"));
+            assert_eq!(active[1].effort.as_deref(), Some("low"));
+            let row = Row::from_active(&active[0]);
+            assert!(row.live);
+            assert_eq!(row.display_model(), "m(high)");
+        }
+    }
+
+    #[test]
+    fn live_trace_is_not_requested_when_it_cannot_add_metadata() {
+        for endpoint in [
+            "https://example.com",
+            "http://192.168.1.1:3425",
+            "http://localhost.example",
+            "not-a-url",
+        ] {
+            load_live_efforts(endpoint, &mut [live_request()], || {
+                panic!("must not fetch remote trace")
+            });
+        }
+        load_live_efforts("http://localhost:3425", &mut [], || {
+            panic!("must not fetch an empty feed")
+        });
+        for patch in [
+            serde_json::json!({"effort":"low"}),
+            serde_json::json!({"route":null}),
+            serde_json::json!({"route":0}),
+            serde_json::json!({"started":null}),
+            serde_json::json!({"started":"invalid"}),
+        ] {
+            let mut request = serde_json::json!({
+                "route":7,"started":"2026-10-20T09:00:00Z","model":"m"
+            });
+            for (key, value) in patch.as_object().unwrap() {
+                request[key] = value.clone();
+            }
+            let mut active = vec![serde_json::from_value(request).unwrap()];
+            load_live_efforts("http://localhost:3425", &mut active, || {
+                panic!("must not fetch unusable or known metadata")
+            });
+        }
+    }
+
+    #[test]
+    fn live_effort_requires_unique_verified_route_identity() {
+        for (field, value) in [
+            ("id", serde_json::json!(8)),
+            ("time", serde_json::json!("2026-10-19T09:00:00Z")),
+            ("time", serde_json::json!(null)),
+            ("session", serde_json::json!("other")),
+            ("session", serde_json::json!(null)),
+            ("agent", serde_json::json!("other")),
+            ("model", serde_json::json!("other")),
+        ] {
+            let mut page = live_trace();
+            page["routes"][0][field] = value;
+            let mut active = vec![live_request()];
+            load_live_efforts("http://localhost:3425", &mut active, || {
+                Ok(serde_json::from_value(page).unwrap())
+            });
+            assert!(active[0].effort.is_none(), "mismatched {field}");
+        }
+        let mut page = live_trace();
+        let duplicate = page["routes"][0].clone();
+        page["routes"].as_array_mut().unwrap().push(duplicate);
+        let mut active = vec![live_request()];
+        load_live_efforts("http://localhost:3425", &mut active, || {
+            Ok(serde_json::from_value(page).unwrap())
+        });
+        assert!(active[0].effort.is_none());
+    }
+
+    #[test]
+    fn unavailable_or_empty_live_trace_keeps_requests_and_unknown_effort() {
+        for error in [
+            ApiError::Unauthorized,
+            ApiError::Rejected("HTTP 404".into()),
+            ApiError::Unreachable("timeout".into()),
+            ApiError::Malformed("invalid JSON".into()),
+        ] {
+            let mut active = vec![live_request()];
+            load_live_efforts("http://localhost:3425", &mut active, || Err(error));
+            assert_eq!(active.len(), 1);
+            assert!(Row::from_active(&active[0]).live);
+            assert!(active[0].effort.is_none());
+        }
+        for effort in [
+            serde_json::json!(null),
+            serde_json::json!(""),
+            serde_json::json!("  "),
+        ] {
+            let mut page = live_trace();
+            page["routes"][0]["effort"] = effort;
+            let mut active = vec![live_request()];
+            load_live_efforts("http://localhost:3425", &mut active, || {
+                Ok(serde_json::from_value(page).unwrap())
+            });
+            assert!(active[0].effort.is_none());
+        }
     }
 
     #[test]
