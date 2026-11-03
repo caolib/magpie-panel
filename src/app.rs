@@ -192,8 +192,8 @@ impl App {
             .map(|_| ("未找到匹配记录".into(), true))
     }
 
-    /// Apply filters and aliases, newest first, capped at the configured row
-    /// count.
+    /// Apply filters and aliases, optionally prioritizing live requests, then
+    /// newest first within each group, capped at the configured row count.
     pub fn rebuild(&mut self) {
         let mut rows: Vec<_> = self
             .raw_rows
@@ -224,7 +224,9 @@ impl App {
             }
         }
 
-        rows.sort_by_key(|row| std::cmp::Reverse(row.age_key()));
+        rows.sort_by_key(|row| {
+            std::cmp::Reverse((self.config.live_first && row.live, row.age_key()))
+        });
         rows.truncate(self.config.row_limit.max(1) as usize);
         self.rows = rows;
         if self.selected.is_some_and(|sel| sel >= self.rows.len()) {

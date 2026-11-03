@@ -28,6 +28,7 @@ pub enum Action {
     Tab(Tab),
     Field(DisplayField),
     ShowAllFields,
+    LiveFirst,
     /// The opacity cell, covered by a native edit box that types the number.
     OpacityInput,
     /// Apply what the opacity box holds; unparsable input reverts.
@@ -353,6 +354,17 @@ impl Layout {
             false,
             false,
             true,
+        );
+        self.checkbox(
+            Rect {
+                x: 184.0,
+                y: 62.0,
+                w: self.width - 208.0,
+                h: 30.0,
+            },
+            "进行中请求置顶",
+            Action::LiveFirst,
+            app.config.live_first,
         );
         let rows = DisplayField::ALL
             .into_iter()

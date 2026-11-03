@@ -6,7 +6,7 @@
 //!
 //! Each poll is two reads: the usage log (finished requests) and the
 //! concurrency feed (live ones). Finished rows keep Magpie's own semantics;
-//! live rows are merged in front by start time.
+//! live rows are merged with them, then sorted by the UI's display settings.
 
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};

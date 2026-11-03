@@ -11,6 +11,31 @@ fn default_config_points_at_the_local_gateway() {
 }
 
 #[test]
+fn live_first_defaults_off_for_new_and_existing_configs() {
+    assert!(!Config::default().live_first);
+    let existing: Config = serde_json::from_str(r#"{"hiddenFields":[],"rowLimit":5}"#).unwrap();
+    assert!(!existing.live_first);
+    assert!(existing.hidden_fields.is_empty());
+    assert_eq!(existing.row_limit, 5);
+}
+
+#[test]
+fn live_first_survives_restart_and_show_all_fields() {
+    for enabled in [false, true] {
+        let mut config = Config {
+            live_first: enabled,
+            ..Config::default()
+        };
+        config.show_all_fields();
+        assert_eq!(config.live_first, enabled);
+        let json = serde_json::to_value(&config).unwrap();
+        assert_eq!(json["liveFirst"], enabled);
+        let back: Config = serde_json::from_value(json).unwrap();
+        assert_eq!(back.live_first, enabled);
+    }
+}
+
+#[test]
 fn window_levels_are_mutually_exclusive_and_survive_restart() {
     for (top, bottom) in [(false, false), (true, false), (false, true), (true, true)] {
         for level in [

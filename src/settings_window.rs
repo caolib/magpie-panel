@@ -815,6 +815,13 @@ fn dispatch(hwnd: HWND, action: Action) {
             });
             actions.push(PanelAction::RedrawDetail);
         }
+        Action::LiveFirst => {
+            PanelState::with(|s| {
+                s.app.config.live_first = !s.app.config.live_first;
+                s.app.rebuild();
+                s.app.save();
+            });
+        }
         Action::OpacityInput => focus_control(hwnd, true),
         Action::SaveOpacity => {
             let field = PanelState::with(|s| {

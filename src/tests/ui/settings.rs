@@ -106,6 +106,45 @@ fn the_fields_tab_has_one_checkbox_per_column() {
 }
 
 #[test]
+fn the_fields_tab_offers_a_separate_live_first_checkbox() {
+    let mut app = app();
+    let mut state = State {
+        tab: Tab::Fields,
+        ..State::default()
+    };
+    for enabled in [false, true] {
+        app.config.live_first = enabled;
+        for (width, height) in [(WIDTH, HEIGHT), (MIN_WIDTH, MIN_HEIGHT)] {
+            let l = Layout::new(&app, &state, width, height);
+            let toggle = l
+                .controls
+                .iter()
+                .find(|c| c.action == Action::LiveFirst)
+                .expect("live-first checkbox");
+            assert!(toggle.body && toggle.check);
+            assert_eq!(toggle.selected, enabled);
+            assert!(toggle.label.ends_with("进行中请求置顶"));
+            let show_all = l
+                .controls
+                .iter()
+                .find(|c| c.action == Action::ShowAllFields)
+                .expect("show all columns");
+            assert_eq!(toggle.rect.y, show_all.rect.y);
+            assert!(toggle.rect.x >= show_all.rect.x + show_all.rect.w);
+            assert!(toggle.rect.x + toggle.rect.w <= width - 24.0);
+            assert_eq!(
+                l.hit(&state, toggle.rect.x + 2.0, TOP + toggle.rect.y + 2.0),
+                Some(Action::LiveFirst)
+            );
+            state.focus = Some(Action::ShowAllFields);
+            l.focus_next(&mut state, false);
+            assert_eq!(state.focus, Some(Action::LiveFirst));
+            assert_eq!(l.max_scroll() > 0.0, height == MIN_HEIGHT);
+        }
+    }
+}
+
+#[test]
 fn the_appearance_tab_offers_opacity_and_fonts_without_overlapping_inputs() {
     let mut app = app();
     app.config.opacity = 73;
@@ -191,7 +230,9 @@ fn no_settings_tab_or_footer_repeats_context_menu_operations() {
                 let l = Layout::new(&app, &state, width, height);
                 for removed in removed_labels {
                     assert!(
-                        l.controls.iter().all(|c| !c.label.contains(removed)),
+                        l.controls.iter().all(|c| {
+                            c.label.trim_start_matches(['☑', '☐', ' ']) != removed
+                        }),
                         "{tab:?} still has a {removed} control"
                     );
                     assert!(

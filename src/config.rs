@@ -59,6 +59,8 @@ pub struct Config {
     pub agent_aliases: Vec<NameAlias>,
     /// Table columns the user switched off. Empty means everything is shown.
     pub hidden_fields: Vec<DisplayField>,
+    /// Put live requests before finished ones, keeping newest first in each group.
+    pub live_first: bool,
     pub window: WindowState,
 }
 
@@ -137,6 +139,7 @@ impl Default for Config {
             provider_aliases: Vec::new(),
             agent_aliases: Vec::new(),
             hidden_fields: DEFAULT_HIDDEN_FIELDS.to_vec(),
+            live_first: false,
             window: WindowState::default(),
         }
     }

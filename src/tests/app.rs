@@ -7,6 +7,12 @@ fn row(json: &str, account: &str) -> Row {
     Row::from_record(&record).with_account(account, account)
 }
 
+fn live_row(json: &str, account: &str) -> Row {
+    let active: crate::model::ActiveRequest =
+        serde_json::from_str(json).expect("valid live request");
+    Row::from_active(&active).with_account(account, account)
+}
+
 fn app_with(rows: Vec<Row>) -> App {
     let mut app = App::new(Config::default());
     app.apply_updates(vec![Update::Snapshot { rows }]);
@@ -58,6 +64,176 @@ fn the_row_limit_caps_what_is_shown() {
     app.config.row_limit = 2;
     app.rebuild();
     assert_eq!(app.rows.len(), 2);
+}
+
+#[test]
+fn live_first_groups_all_connections_and_can_restore_time_order() {
+    let mut app = app_with(vec![
+        live_row(
+            r#"{"started":"2026-10-20T09:00:00Z","model":"live-old"}"#,
+            "a1",
+        ),
+        row(r#"{"t":"2026-10-20T12:00:00Z","model":"done"}"#, "a1"),
+        live_row(
+            r#"{"started":"2026-10-20T10:00:00Z","model":"live-new"}"#,
+            "a2",
+        ),
+        row(
+            r#"{"t":"2026-10-20T11:00:00Z","model":"failed","status":500}"#,
+            "a2",
+        ),
+    ]);
+    for (enabled, expected) in [
+        (false, ["done", "failed", "live-new", "live-old"]),
+        (true, ["live-new", "live-old", "done", "failed"]),
+        (false, ["done", "failed", "live-new", "live-old"]),
+    ] {
+        app.config.live_first = enabled;
+        app.rebuild();
+        assert_eq!(
+            app.rows
+                .iter()
+                .map(|r| r.model.as_str())
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn live_first_prioritizes_before_applying_the_row_limit() {
+    let mut app = app_with(vec![
+        row(r#"{"t":"2026-10-20T12:00:00Z","model":"done"}"#, "a1"),
+        live_row(
+            r#"{"started":"2026-10-20T09:00:00Z","model":"live-old"}"#,
+            "a1",
+        ),
+        live_row(
+            r#"{"started":"2026-10-20T10:00:00Z","model":"live-new"}"#,
+            "a2",
+        ),
+    ]);
+    app.config.live_first = true;
+    for limit in [1, 2, 3] {
+        app.config.row_limit = limit;
+        app.rebuild();
+        assert_eq!(
+            app.rows
+                .iter()
+                .map(|r| r.model.as_str())
+                .collect::<Vec<_>>(),
+            ["live-new", "live-old", "done"][..limit as usize]
+        );
+    }
+}
+
+#[test]
+fn live_first_still_respects_query_status_and_hidden_providers() {
+    let mut app = app_with(vec![
+        row(r#"{"t":"2026-10-20T12:00:00Z","model":"match-done"}"#, "a1"),
+        live_row(
+            r#"{"started":"2026-10-20T09:00:00Z","model":"match-hidden","provider":"p"}"#,
+            "a1",
+        ),
+        live_row(
+            r#"{"started":"2026-10-20T10:00:00Z","model":"match-live","provider":"p"}"#,
+            "a2",
+        ),
+        live_row(
+            r#"{"started":"2026-10-20T11:00:00Z","model":"other","provider":"p"}"#,
+            "a2",
+        ),
+    ]);
+    app.config.live_first = true;
+    app.config.hidden_providers.push(HiddenProvider {
+        account_id: "a1".into(),
+        provider: "p".into(),
+    });
+    app.query_draft = "match".into();
+    app.apply_query();
+    assert_eq!(
+        app.rows
+            .iter()
+            .map(|r| r.model.as_str())
+            .collect::<Vec<_>>(),
+        ["match-live", "match-done"]
+    );
+    app.click_filter(Filter::Completed);
+    assert_eq!(app.rows.len(), 1);
+    assert_eq!(app.rows[0].model, "match-done");
+    app.click_filter(Filter::All);
+    app.click_filter(Filter::Live);
+    assert_eq!(app.rows.len(), 1);
+    assert_eq!(app.rows[0].model, "match-live");
+    app.query_draft = "missing".into();
+    app.apply_query();
+    assert!(app.rows.is_empty());
+}
+
+#[test]
+fn finished_requests_leave_the_live_first_group_on_the_next_snapshot() {
+    let newer = row(r#"{"t":"2026-10-20T12:00:00Z","model":"newer"}"#, "a2");
+    let mut app = app_with(vec![
+        newer.clone(),
+        live_row(
+            r#"{"started":"2026-10-20T09:00:00Z","model":"older"}"#,
+            "a1",
+        ),
+    ]);
+    app.config.live_first = true;
+    app.rebuild();
+    assert_eq!(app.rows[0].model, "older");
+    for status in [200, 500] {
+        app.apply_updates(vec![Update::Snapshot {
+            rows: vec![
+                newer.clone(),
+                row(
+                    &format!(r#"{{"t":"2026-10-20T09:00:00Z","model":"older","status":{status}}}"#),
+                    "a1",
+                ),
+            ],
+        }]);
+        assert_eq!(app.rows[0].model, "newer");
+        assert_eq!(app.rows[1].model, "older");
+        assert!(app.rows.iter().all(|r| !r.live));
+    }
+}
+
+#[test]
+fn live_first_keeps_equal_times_stable_and_unknown_times_last_in_each_group() {
+    let mut app = app_with(vec![
+        row(r#"{"model":"done-unknown"}"#, "a1"),
+        live_row(r#"{"started":"invalid","model":"live-unknown"}"#, "a1"),
+        row(r#"{"t":"2026-10-20T12:00:00Z","model":"done-first"}"#, "a1"),
+        live_row(
+            r#"{"started":"2026-10-20T09:00:00Z","model":"live-first"}"#,
+            "a1",
+        ),
+        live_row(
+            r#"{"started":"2026-10-20T09:00:00Z","model":"live-second"}"#,
+            "a2",
+        ),
+        row(
+            r#"{"t":"2026-10-20T12:00:00Z","model":"done-second"}"#,
+            "a2",
+        ),
+    ]);
+    app.config.live_first = true;
+    app.rebuild();
+    assert_eq!(
+        app.rows
+            .iter()
+            .map(|r| r.model.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "live-first",
+            "live-second",
+            "live-unknown",
+            "done-first",
+            "done-second",
+            "done-unknown"
+        ]
+    );
 }
 
 #[test]
