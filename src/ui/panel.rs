@@ -122,7 +122,7 @@ pub(crate) type ModelColorKey<'a> = (&'a str, Option<&'a str>);
 
 /// Effort is part of the model's identity; routing brackets are not.
 pub(crate) fn model_color_key(row: &Row) -> ModelColorKey<'_> {
-    (row.served_model(), row.reasoning_effort.as_deref())
+    row.model_key()
 }
 
 /// Map model/effort pairs to colours, scanning displayed rows bottom-up.

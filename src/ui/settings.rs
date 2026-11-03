@@ -31,6 +31,7 @@ pub enum Action {
     Field(DisplayField),
     ShowAllFields,
     LiveFirst,
+    GroupByModel,
     /// The opacity cell, covered by a native edit box that types the number.
     OpacityInput,
     /// Apply what the opacity box holds; unparsable input reverts.
@@ -388,6 +389,17 @@ impl Layout {
             Action::LiveFirst,
             app.config.live_first,
         );
+        self.checkbox(
+            Rect {
+                x: 24.0,
+                y: 98.0,
+                w: self.width - 48.0,
+                h: 30.0,
+            },
+            "按模型分组",
+            Action::GroupByModel,
+            app.config.group_by_model,
+        );
         let rows = DisplayField::ALL
             .into_iter()
             .map(|field| {
@@ -398,9 +410,9 @@ impl Layout {
                 )
             })
             .collect();
-        self.check_grid(108.0, rows, 2);
+        self.check_grid(144.0, rows, 2);
         let grid_rows = DisplayField::ALL.len().div_ceil(2);
-        self.content_height = 108.0 + grid_rows as f32 * 36.0 + 12.0;
+        self.content_height = 144.0 + grid_rows as f32 * 36.0;
     }
 
     fn accounts(&mut self, app: &App) {

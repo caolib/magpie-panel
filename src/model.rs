@@ -798,6 +798,11 @@ impl Row {
         }
     }
 
+    /// Display identity shared by grouping and name colours; routing brackets do not count.
+    pub fn model_key(&self) -> (&str, Option<&str>) {
+        (self.served_model(), self.reasoning_effort.as_deref())
+    }
+
     /// Whether the request was served by a model other than the one asked for.
     pub fn is_routed(&self) -> bool {
         !self.requested_model.is_empty()

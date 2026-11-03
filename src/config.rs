@@ -63,6 +63,8 @@ pub struct Config {
     pub hidden_fields: Vec<DisplayField>,
     /// Put live requests before finished ones, keeping newest first in each group.
     pub live_first: bool,
+    /// Group displayed finished rows by model and effort, leaving live slots unchanged.
+    pub group_by_model: bool,
     pub window: WindowState,
 }
 
@@ -168,6 +170,7 @@ impl Default for Config {
             agent_aliases: Vec::new(),
             hidden_fields: DEFAULT_HIDDEN_FIELDS.to_vec(),
             live_first: false,
+            group_by_model: false,
             window: WindowState::default(),
         }
     }

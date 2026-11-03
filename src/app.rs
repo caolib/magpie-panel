@@ -192,8 +192,8 @@ impl App {
             .map(|_| ("未找到匹配记录".into(), true))
     }
 
-    /// Apply filters and aliases, optionally prioritizing live requests, then
-    /// newest first within each group, capped at the configured row count.
+    /// Select the newest filtered rows, optionally prioritizing live requests.
+    /// Model grouping only reorders finished rows within that selected page.
     pub fn rebuild(&mut self) {
         let mut rows: Vec<_> = self
             .raw_rows
@@ -228,6 +228,9 @@ impl App {
             std::cmp::Reverse((self.config.live_first && row.live, row.age_key()))
         });
         rows.truncate(self.config.row_limit.max(1) as usize);
+        if self.config.group_by_model {
+            group_model_rows(&mut rows);
+        }
         self.rows = rows;
         if self.selected.is_some_and(|sel| sel >= self.rows.len()) {
             self.selected = None;
@@ -291,6 +294,42 @@ impl App {
     /// Persist anything that changed while running.
     pub fn save(&self) {
         self.config.save();
+    }
+}
+
+/// Input is newest first. First-encounter group ranks retain that priority;
+/// only finished-row slots move, so live rows keep their original positions.
+fn group_model_rows(rows: &mut [Row]) {
+    let slots: Vec<_> = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(i, row)| (!row.live).then_some(i))
+        .collect();
+    let order = {
+        let mut groups = std::collections::HashMap::new();
+        let mut order: Vec<_> = slots
+            .iter()
+            .enumerate()
+            .map(|(source, &slot)| {
+                let next = groups.len();
+                let rank = *groups.entry(rows[slot].model_key()).or_insert(next);
+                (source, rank)
+            })
+            .collect();
+        order.sort_by_key(|(_, rank)| *rank);
+        order
+    };
+    // Invert source order into destinations, then apply the permutation in place.
+    let mut destinations = vec![0; slots.len()];
+    for (destination, (source, _)) in order.into_iter().enumerate() {
+        destinations[source] = destination;
+    }
+    for source in 0..slots.len() {
+        while destinations[source] != source {
+            let destination = destinations[source];
+            rows.swap(slots[source], slots[destination]);
+            destinations.swap(source, destination);
+        }
     }
 }
 

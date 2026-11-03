@@ -106,6 +106,46 @@ fn live_first_survives_restart_and_show_all_fields() {
 }
 
 #[test]
+fn group_by_model_defaults_off_without_changing_existing_config() {
+    assert!(!Config::default().group_by_model);
+    for json in ["{}", r#"{"hiddenFields":[],"rowLimit":5,"liveFirst":true}"#] {
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert!(!config.group_by_model);
+    }
+    let existing: Config =
+        serde_json::from_str(r#"{"hiddenFields":[],"rowLimit":5,"liveFirst":true,"opacity":73}"#)
+            .unwrap();
+    assert!(existing.hidden_fields.is_empty());
+    assert_eq!(existing.row_limit, 5);
+    assert!(existing.live_first);
+    assert_eq!(existing.opacity, 73);
+}
+
+#[test]
+fn group_by_model_round_trips_and_show_all_keeps_both_sort_switches() {
+    for group_by_model in [false, true] {
+        for live_first in [false, true] {
+            let mut config = Config {
+                group_by_model,
+                live_first,
+                ..Config::default()
+            };
+            config.show_all_fields();
+            assert!(config.hidden_fields.is_empty());
+            assert_eq!(config.group_by_model, group_by_model);
+            assert_eq!(config.live_first, live_first);
+            let json = serde_json::to_value(&config).unwrap();
+            assert_eq!(json["groupByModel"], group_by_model);
+            assert_eq!(json["liveFirst"], live_first);
+            assert!(json.get("group_by_model").is_none());
+            let back: Config = serde_json::from_value(json).unwrap();
+            assert_eq!(back.group_by_model, group_by_model);
+            assert_eq!(back.live_first, live_first);
+        }
+    }
+}
+
+#[test]
 fn window_levels_are_mutually_exclusive_and_survive_restart() {
     for (top, bottom) in [(false, false), (true, false), (false, true), (true, true)] {
         for level in [

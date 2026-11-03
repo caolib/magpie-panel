@@ -145,6 +145,89 @@ fn the_fields_tab_offers_a_separate_live_first_checkbox() {
 }
 
 #[test]
+fn the_fields_tab_offers_a_separate_model_grouping_checkbox() {
+    let mut app = app();
+    for enabled in [false, true] {
+        app.config.group_by_model = enabled;
+        for (width, height) in [(WIDTH, HEIGHT), (MIN_WIDTH, MIN_HEIGHT)] {
+            let mut state = State {
+                tab: Tab::Fields,
+                ..State::default()
+            };
+            let l = Layout::new(&app, &state, width, height);
+            let toggle = l
+                .controls
+                .iter()
+                .find(|c| c.action == Action::GroupByModel)
+                .expect("model grouping checkbox");
+            assert!(toggle.body && toggle.check && !toggle.danger);
+            assert_eq!(toggle.selected, enabled);
+            assert_eq!(
+                toggle.label.trim_start_matches(['☑', '☐', ' ']),
+                "按模型分组"
+            );
+            let show_all = l
+                .controls
+                .iter()
+                .find(|c| c.action == Action::ShowAllFields)
+                .unwrap();
+            let live_first = l
+                .controls
+                .iter()
+                .find(|c| c.action == Action::LiveFirst)
+                .unwrap();
+            assert!(toggle.rect.y >= show_all.rect.y + show_all.rect.h);
+            assert!(toggle.rect.y >= live_first.rect.y + live_first.rect.h);
+            assert!(toggle.rect.x >= 24.0 && toggle.rect.x + toggle.rect.w <= width - 24.0);
+            let rect = l.screen_rect(toggle, state.scroll);
+            assert_eq!(
+                l.hit(&state, rect.x + 2.0, rect.y + 2.0),
+                Some(Action::GroupByModel)
+            );
+            state.focus = Some(Action::LiveFirst);
+            l.focus_next(&mut state, false);
+            assert_eq!(state.focus, Some(Action::GroupByModel));
+            l.focus_next(&mut state, false);
+            assert_eq!(state.focus, Some(Action::Field(DisplayField::Model)));
+            l.focus_next(&mut state, true);
+            assert_eq!(state.focus, Some(Action::GroupByModel));
+            assert_eq!(l.max_scroll() > 0.0, height == MIN_HEIGHT);
+            let body: Vec<_> = l.controls.iter().filter(|c| c.body).collect();
+            for (i, control) in body.iter().enumerate() {
+                let r = control.rect;
+                assert!(r.x >= 24.0 && r.x + r.w <= width - 24.0);
+                assert!(r.y + r.h <= l.content_height);
+                for other in &body[i + 1..] {
+                    let s = other.rect;
+                    assert!(
+                        r.x + r.w <= s.x
+                            || s.x + s.w <= r.x
+                            || r.y + r.h <= s.y
+                            || s.y + s.h <= r.y,
+                        "{:?} overlaps {:?}",
+                        control.action,
+                        other.action
+                    );
+                }
+            }
+        }
+    }
+    for tab in [
+        Tab::Appearance,
+        Tab::Accounts,
+        Tab::Providers,
+        Tab::Mappings,
+    ] {
+        let state = State {
+            tab,
+            ..State::default()
+        };
+        let l = Layout::new(&app, &state, WIDTH, HEIGHT);
+        assert!(l.controls.iter().all(|c| c.action != Action::GroupByModel));
+    }
+}
+
+#[test]
 fn the_appearance_tab_offers_opacity_themes_and_fonts_without_overlapping_inputs() {
     let mut app = app();
     app.config.opacity = 73;

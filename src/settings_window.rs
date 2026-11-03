@@ -830,6 +830,13 @@ fn dispatch(hwnd: HWND, action: Action) {
                 s.app.save();
             });
         }
+        Action::GroupByModel => {
+            PanelState::with(|s| {
+                s.app.config.group_by_model = !s.app.config.group_by_model;
+                s.app.rebuild();
+                s.app.save();
+            });
+        }
         Action::NameColorTheme(theme) => {
             PanelState::with(|s| {
                 s.app.config.name_color_theme = theme;

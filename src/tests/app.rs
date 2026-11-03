@@ -236,6 +236,287 @@ fn live_first_keeps_equal_times_stable_and_unknown_times_last_in_each_group() {
     );
 }
 
+fn model_group_fixture() -> Vec<Row> {
+    [
+        ("A", 6, "A-new"),
+        ("B", 5, "B-new"),
+        ("A", 4, "A-old"),
+        ("C", 3, "C-new"),
+        ("B", 2, "B-old"),
+        ("C", 1, "C-old"),
+    ]
+    .into_iter()
+    .map(|(model, second, agent)| {
+        row(
+            &format!(
+                r#"{{"t":"2026-10-20T09:00:0{second}Z","model":"{model}","agent":"{agent}"}}"#
+            ),
+            "a1",
+        )
+    })
+    .collect()
+}
+
+#[test]
+fn model_grouping_defaults_off_and_can_restore_chronological_order() {
+    let mut app = app_with(model_group_fixture());
+    for (enabled, expected) in [
+        (
+            false,
+            ["A-new", "B-new", "A-old", "C-new", "B-old", "C-old"],
+        ),
+        (true, ["A-new", "A-old", "B-new", "B-old", "C-new", "C-old"]),
+        (
+            false,
+            ["A-new", "B-new", "A-old", "C-new", "B-old", "C-old"],
+        ),
+    ] {
+        app.config.group_by_model = enabled;
+        app.rebuild();
+        assert_eq!(
+            app.rows
+                .iter()
+                .map(|row| row.agent.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn grouping_only_reorders_the_records_already_selected_by_the_row_limit() {
+    let mut app = app_with(model_group_fixture());
+    app.config.row_limit = 4;
+    app.rebuild();
+    let mut selected: Vec<_> = app.rows.iter().map(|r| r.id.clone()).collect();
+    selected.sort();
+    app.config.group_by_model = true;
+    app.rebuild();
+    let mut grouped: Vec<_> = app.rows.iter().map(|r| r.id.clone()).collect();
+    grouped.sort();
+    assert_eq!(grouped, selected);
+    assert_eq!(
+        app.rows
+            .iter()
+            .map(|row| row.agent.as_deref().unwrap())
+            .collect::<Vec<_>>(),
+        ["A-new", "A-old", "B-new", "C-new"]
+    );
+}
+
+#[test]
+fn grouping_never_moves_or_groups_live_rows_with_either_live_first_setting() {
+    let mut fixture = model_group_fixture();
+    fixture.extend([
+        live_row(
+            r#"{"route":1,"started":"2026-10-20T09:00:05Z","model":"A"}"#,
+            "a2",
+        ),
+        live_row(
+            r#"{"route":2,"started":"2026-10-20T09:00:03Z","model":"Z"}"#,
+            "a1",
+        ),
+    ]);
+    let mut app = app_with(fixture);
+    for live_first in [false, true] {
+        app.config.live_first = live_first;
+        app.config.group_by_model = false;
+        app.rebuild();
+        let live_slots: Vec<_> = app
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.live)
+            .map(|(i, r)| (i, r.id.clone()))
+            .collect();
+        app.config.group_by_model = true;
+        app.rebuild();
+        for (index, id) in live_slots {
+            assert_eq!(app.rows[index].id, id);
+            assert!(app.rows[index].live);
+        }
+        assert_eq!(
+            app.rows
+                .iter()
+                .filter(|r| !r.live)
+                .map(|r| r.agent.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            ["A-new", "A-old", "B-new", "B-old", "C-new", "C-old"]
+        );
+    }
+    app.click_filter(Filter::Live);
+    assert_eq!(
+        app.rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+        ["live:1", "live:2"]
+    );
+}
+
+#[test]
+fn grouping_uses_display_model_and_effort_across_providers_connections_and_routing() {
+    let mut app = app_with(vec![
+        row(
+            r#"{"t":"2026-10-20T09:00:05Z","model":"long-A","effort":"high","provider":"p1"}"#,
+            "a1",
+        ),
+        row(
+            r#"{"t":"2026-10-20T09:00:04Z","model":"A","effort":"low"}"#,
+            "a1",
+        ),
+        row(
+            r#"{"t":"2026-10-20T09:00:03Z","model":"A","req":"group","effort":"high","provider":"p2"}"#,
+            "a2",
+        ),
+        row(r#"{"t":"2026-10-20T09:00:02Z","model":"A"}"#, "a1"),
+        row(
+            r#"{"t":"2026-10-20T09:00:01Z","model":"A","effort":"low"}"#,
+            "a2",
+        ),
+    ]);
+    app.config.model_aliases.push(NameAlias {
+        from: "long-".into(),
+        to: "".into(),
+    });
+    app.config.group_by_model = true;
+    app.rebuild();
+    assert_eq!(
+        app.rows
+            .iter()
+            .map(|r| r.reasoning_effort.as_deref())
+            .collect::<Vec<_>>(),
+        [Some("high"), Some("high"), Some("low"), Some("low"), None]
+    );
+    assert_ne!(app.rows[0].display_model(), app.rows[1].display_model());
+    assert_eq!(app.rows[0].model_key(), app.rows[1].model_key());
+    assert_ne!(app.rows[0].account_id, app.rows[1].account_id);
+    assert_ne!(app.rows[0].provider, app.rows[1].provider);
+}
+
+#[test]
+fn grouping_respects_search_status_and_provider_filters_before_grouping() {
+    let mut fixture = model_group_fixture();
+    fixture[0].provider_id = Some("hidden".into());
+    fixture[2].status = Status::Failed;
+    let mut app = app_with(fixture);
+    app.config.group_by_model = true;
+    app.config.hidden_providers.push(HiddenProvider {
+        account_id: "a1".into(),
+        provider: "hidden".into(),
+    });
+    app.rebuild();
+    assert_eq!(
+        app.rows
+            .iter()
+            .map(|r| r.agent.as_deref().unwrap())
+            .collect::<Vec<_>>(),
+        ["B-new", "B-old", "A-old", "C-new", "C-old"]
+    );
+    app.click_filter(Filter::Completed);
+    assert!(app.rows.iter().all(|r| r.status == Status::Completed));
+    assert_eq!(
+        app.rows
+            .iter()
+            .map(|r| r.agent.as_deref().unwrap())
+            .collect::<Vec<_>>(),
+        ["B-new", "B-old", "C-new", "C-old"]
+    );
+    app.query_draft = "C".into();
+    app.apply_query();
+    assert_eq!(
+        app.rows
+            .iter()
+            .map(|r| r.agent.as_deref().unwrap())
+            .collect::<Vec<_>>(),
+        ["C-new", "C-old"]
+    );
+}
+
+#[test]
+fn a_finished_request_joins_its_model_group_on_the_next_snapshot() {
+    let mut app = app_with(vec![
+        row(r#"{"t":"2026-10-20T09:00:06Z","model":"A"}"#, "a1"),
+        row(r#"{"t":"2026-10-20T09:00:05Z","model":"B"}"#, "a1"),
+        live_row(r#"{"started":"2026-10-20T09:00:04Z","model":"A"}"#, "a1"),
+    ]);
+    app.config.group_by_model = true;
+    app.rebuild();
+    assert_eq!(
+        app.rows
+            .iter()
+            .map(|r| r.model.as_str())
+            .collect::<Vec<_>>(),
+        ["A", "B", "A"]
+    );
+    for status in [200, 500] {
+        let mut rows = app.raw_rows().to_vec();
+        rows[2] = row(
+            &format!(r#"{{"t":"2026-10-20T09:00:04Z","model":"A","status":{status}}}"#),
+            "a1",
+        );
+        app.apply_updates(vec![Update::Snapshot { rows }]);
+        assert_eq!(
+            app.rows
+                .iter()
+                .map(|r| r.model.as_str())
+                .collect::<Vec<_>>(),
+            ["A", "A", "B"]
+        );
+    }
+}
+
+#[test]
+fn model_group_permutations_keep_stable_order_and_live_slots() {
+    // Exhaustive small inputs exercise both permutation directions and empty/single groups.
+    for length in 0..=5 {
+        for pattern in 0..3usize.pow(length) {
+            let mut digits = pattern;
+            let original: Vec<_> = (0..length)
+                .map(|index| {
+                    let category = digits % 3;
+                    digits /= 3;
+                    let model = ["A", "B", "live"][category];
+                    if category == 2 {
+                        live_row(&format!(r#"{{"route":{index},"model":"{model}"}}"#), "a1")
+                    } else {
+                        row(
+                            &format!(r#"{{"model":"{model}","session":"{index}"}}"#),
+                            "a1",
+                        )
+                    }
+                })
+                .collect();
+            let mut expected = Vec::new();
+            let mut names = Vec::new();
+            for row in original.iter().filter(|r| !r.live) {
+                if !names.contains(&row.model.as_str()) {
+                    names.push(row.model.as_str());
+                }
+            }
+            for model in names {
+                expected.extend(
+                    original
+                        .iter()
+                        .filter(|r| !r.live && r.model == model)
+                        .map(|r| r.id.clone()),
+                );
+            }
+            let mut grouped = original.clone();
+            group_model_rows(&mut grouped);
+            assert_eq!(
+                grouped
+                    .iter()
+                    .filter(|r| !r.live)
+                    .map(|r| r.id.clone())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            for (index, row) in original.iter().enumerate().filter(|(_, r)| r.live) {
+                assert!(grouped[index].live);
+                assert_eq!(grouped[index].id, row.id);
+            }
+        }
+    }
+}
+
 #[test]
 fn model_aliases_apply_to_every_model_field() {
     let mut app = app_with(vec![row(
