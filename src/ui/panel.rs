@@ -4,7 +4,7 @@
 //! draws the header (filter chips, query box, settings button) and owns the
 //! hit-test geometry shared by painting and input; `ui::table` draws the rows.
 
-use crate::config::{Account, DisplayField};
+use crate::config::{Account, DisplayField, NameColorTheme};
 use crate::model::{self, Filter, FilterMask, Row};
 use crate::theme::{self, Painter};
 use crate::ui::layout::{Metrics, Rect};
@@ -55,39 +55,86 @@ const NAME_PALETTE: [u32; 9] = [
     0xFFFF_6B6B,
 ];
 
-/// Hand the palette out to `names`, which are listed newest first, so the
-/// oldest name on the page keeps the default light blue.
-fn rank_palette(names: &mut [(&str, u32)]) {
-    let count = names.len();
-    for (i, (_, color)) in names.iter_mut().enumerate() {
-        *color = NAME_PALETTE[(count - 1 - i) % NAME_PALETTE.len()];
+/// Alternate name palettes validated against the panel and hover surfaces.
+const SOFT_PALETTE: [u32; 8] = [
+    0xFF56_95D4,
+    0xFFCC_7181,
+    0xFF83_88D6,
+    0xFFCC_7759,
+    0xFFA6_7CC5,
+    0xFFBD_8338,
+    0xFFBF_74A7,
+    0xFFA1_9233,
+];
+const BRIGHT_PALETTE: [u32; 8] = [
+    0xFF8B_80F6,
+    0xFFE0_5AAE,
+    0xFFED_6300,
+    0xFFBE_69E2,
+    0xFFF1_566D,
+    0xFF17_A8A9,
+    0xFFBB_893E,
+    0xFF45_A983,
+];
+const COOL_WARM_PALETTE: [u32; 8] = [
+    0xFF29_A1C1,
+    0xFFDD_667D,
+    0xFF3E_96EA,
+    0xFFCD_6AAF,
+    0xFFC4_8225,
+    0xFF82_85EB,
+    0xFFDD_6D45,
+    0xFFAE_75D6,
+];
+
+fn name_palette(theme: NameColorTheme) -> &'static [u32] {
+    match theme {
+        NameColorTheme::Classic => &NAME_PALETTE,
+        NameColorTheme::Soft => &SOFT_PALETTE,
+        NameColorTheme::Bright => &BRIGHT_PALETTE,
+        NameColorTheme::CoolWarm => &COOL_WARM_PALETTE,
     }
 }
 
-/// Map each distinct provider in `rows` (newest first) to a palette colour.
-pub(crate) fn provider_palette(rows: &[Row]) -> Vec<(&str, u32)> {
+/// Hand colours out in bottom-to-top encounter order; overflow keeps neutral ink.
+fn rank_palette<T>(names: &mut [(T, u32)], theme: NameColorTheme) {
+    let palette = name_palette(theme);
+    for (i, (_, color)) in names.iter_mut().enumerate() {
+        *color = palette.get(i).copied().unwrap_or(theme::TEXT);
+    }
+}
+
+/// Map each distinct provider to a colour, scanning the displayed rows bottom-up.
+pub(crate) fn provider_palette(rows: &[Row], theme: NameColorTheme) -> Vec<(&str, u32)> {
     let mut map: Vec<(&str, u32)> = Vec::new();
-    for row in rows {
+    for row in rows.iter().rev() {
         if let Some(provider) = row.provider.as_deref()
             && !map.iter().any(|(n, _)| *n == provider)
         {
             map.push((provider, 0));
         }
     }
-    rank_palette(&mut map);
+    rank_palette(&mut map, theme);
     map
 }
 
-/// Map each distinct served model in `rows` (newest first) to a palette colour.
-pub(crate) fn model_palette(rows: &[Row]) -> Vec<(&str, u32)> {
-    let mut map: Vec<(&str, u32)> = Vec::new();
-    for row in rows {
-        let model = row.served_model();
-        if !map.iter().any(|(n, _)| *n == model) {
-            map.push((model, 0));
+pub(crate) type ModelColorKey<'a> = (&'a str, Option<&'a str>);
+
+/// Effort is part of the model's identity; routing brackets are not.
+pub(crate) fn model_color_key(row: &Row) -> ModelColorKey<'_> {
+    (row.served_model(), row.reasoning_effort.as_deref())
+}
+
+/// Map model/effort pairs to colours, scanning displayed rows bottom-up.
+pub(crate) fn model_palette(rows: &[Row], theme: NameColorTheme) -> Vec<(ModelColorKey<'_>, u32)> {
+    let mut map = Vec::new();
+    for row in rows.iter().rev() {
+        let key = model_color_key(row);
+        if !map.iter().any(|(n, _)| *n == key) {
+            map.push((key, 0));
         }
     }
-    rank_palette(&mut map);
+    rank_palette(&mut map, theme);
     map
 }
 
@@ -109,6 +156,8 @@ pub struct ListView<'a> {
     pub filter: FilterMask,
     /// Table columns the user switched off.
     pub hidden_fields: &'a [DisplayField],
+    /// Palette for model and provider names; other cell colours stay fixed.
+    pub name_color_theme: NameColorTheme,
     /// The text the list was narrowed to, if the header box was submitted.
     pub query: Option<&'a str>,
     /// What is typed into the header box.

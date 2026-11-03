@@ -11,6 +11,76 @@ fn default_config_points_at_the_local_gateway() {
 }
 
 #[test]
+fn name_color_theme_defaults_to_classic_without_changing_existing_settings() {
+    assert_eq!(NameColorTheme::default(), NameColorTheme::Classic);
+    assert_eq!(Config::default().name_color_theme, NameColorTheme::Classic);
+    let existing: Config = serde_json::from_str(
+        r#"{"opacity":73,"fontFamily":"Arial","hiddenFields":[],"liveFirst":true}"#,
+    )
+    .unwrap();
+    assert_eq!(existing.name_color_theme, NameColorTheme::Classic);
+    assert_eq!(existing.opacity, 73);
+    assert_eq!(existing.font_family, "Arial");
+    assert!(existing.hidden_fields.is_empty());
+    assert!(existing.live_first);
+}
+
+#[test]
+fn name_color_themes_have_stable_labels_and_round_trip_as_camel_case() {
+    assert_eq!(
+        NameColorTheme::ALL,
+        [
+            NameColorTheme::Classic,
+            NameColorTheme::Soft,
+            NameColorTheme::Bright,
+            NameColorTheme::CoolWarm,
+        ]
+    );
+    for (theme, (label, wire)) in NameColorTheme::ALL.into_iter().zip([
+        ("经典", "classic"),
+        ("柔和", "soft"),
+        ("明亮", "bright"),
+        ("冷暖", "coolWarm"),
+    ]) {
+        assert_eq!(theme.label(), label);
+        let config = Config {
+            name_color_theme: theme,
+            opacity: 73,
+            ..Config::default()
+        };
+        let json = serde_json::to_value(&config).unwrap();
+        assert_eq!(json["nameColorTheme"], wire);
+        assert!(json.get("name_color_theme").is_none());
+        let back: Config = serde_json::from_value(json).unwrap();
+        assert_eq!(back.name_color_theme, theme);
+        assert_eq!(back.opacity, 73);
+    }
+}
+
+#[test]
+fn an_unknown_name_color_theme_falls_back_without_discarding_the_config() {
+    for unknown in ["futureTheme", "", "CLASSIC"] {
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "nameColorTheme": unknown,
+            "opacity": 73,
+            "fontFamily": "Arial",
+            "hiddenFields": ["model"],
+            "liveFirst": true,
+        }))
+        .unwrap();
+        assert_eq!(config.name_color_theme, NameColorTheme::Classic);
+        assert_eq!(config.opacity, 73);
+        assert_eq!(config.font_family, "Arial");
+        assert_eq!(config.hidden_fields, vec![DisplayField::Model]);
+        assert!(config.live_first);
+        assert_eq!(
+            serde_json::to_value(config).unwrap()["nameColorTheme"],
+            "classic"
+        );
+    }
+}
+
+#[test]
 fn live_first_defaults_off_for_new_and_existing_configs() {
     assert!(!Config::default().live_first);
     let existing: Config = serde_json::from_str(r#"{"hiddenFields":[],"rowLimit":5}"#).unwrap();

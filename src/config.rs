@@ -46,6 +46,8 @@ pub struct Config {
     pub cjk_font_family: String,
     /// Panel opacity in percent (10–100).
     pub opacity: u8,
+    /// Colors for model and provider names only; surfaces and status colors stay fixed.
+    pub name_color_theme: NameColorTheme,
     /// Saved Magpie gateways. All of them are polled and their requests merged
     /// into one list; keys live in the encrypted blob under the same ids.
     pub accounts: Vec<Account>,
@@ -62,6 +64,31 @@ pub struct Config {
     /// Put live requests before finished ones, keeping newest first in each group.
     pub live_first: bool,
     pub window: WindowState,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NameColorTheme {
+    Soft,
+    Bright,
+    CoolWarm,
+    // Serde requires the fallback variant to be last; ALL defines the UI order.
+    #[default]
+    #[serde(other)]
+    Classic,
+}
+
+impl NameColorTheme {
+    pub const ALL: [Self; 4] = [Self::Classic, Self::Soft, Self::Bright, Self::CoolWarm];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Classic => "经典",
+            Self::Soft => "柔和",
+            Self::Bright => "明亮",
+            Self::CoolWarm => "冷暖",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +156,7 @@ impl Default for Config {
             font_family: String::new(),
             cjk_font_family: String::new(),
             opacity: 100,
+            name_color_theme: NameColorTheme::Classic,
             always_on_top: true,
             pin_position: false,
             always_on_bottom: false,

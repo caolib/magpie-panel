@@ -1,7 +1,9 @@
 //! Settings content and geometry, shared by painting, pointer and keyboard input.
 
 use crate::app::{App, ProbeState};
-use crate::config::{AliasKind, DisplayField, HiddenProvider, OPACITY_MAX, OPACITY_MIN};
+use crate::config::{
+    AliasKind, DisplayField, HiddenProvider, NameColorTheme, OPACITY_MAX, OPACITY_MIN,
+};
 use crate::font_catalog::InstalledFont;
 use crate::theme::{self, Fonts, Painter};
 use crate::ui::layout::Rect;
@@ -33,6 +35,7 @@ pub enum Action {
     OpacityInput,
     /// Apply what the opacity box holds; unparsable input reverts.
     SaveOpacity,
+    NameColorTheme(NameColorTheme),
     FontFamily(String),
     FontSearch,
     AddAccount,
@@ -331,7 +334,26 @@ impl Layout {
             format!("输入 {OPACITY_MIN}–{OPACITY_MAX} 之间的数值(可含小数),点保存生效"),
             false,
         );
-        self.fonts(app, state, 106.0);
+        self.label(106.0, "名称配色", true);
+        self.label(132.0, "仅影响模型名与供应商", false);
+        let gap = 8.0;
+        let w = (self.width - 48.0 - gap * 3.0) / 4.0;
+        for (index, theme) in NameColorTheme::ALL.into_iter().enumerate() {
+            self.button(
+                Rect {
+                    x: 24.0 + index as f32 * (w + gap),
+                    y: 162.0,
+                    w,
+                    h: 30.0,
+                },
+                theme.label(),
+                Action::NameColorTheme(theme),
+                app.config.name_color_theme == theme,
+                false,
+                true,
+            );
+        }
+        self.fonts(app, state, 210.0);
     }
 
     fn fields(&mut self, app: &App) {

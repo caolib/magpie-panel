@@ -117,7 +117,7 @@ impl Column {
         row: &Row,
         v: &ListView,
         providers: &[(&str, u32)],
-        models: &[(&str, u32)],
+        models: &[(panel::ModelColorKey<'_>, u32)],
     ) -> u32 {
         if self.value(row, v.now).is_none() {
             return theme::status_color(row.status);
@@ -127,7 +127,7 @@ impl Column {
             Column::Field(field) => match field {
                 DisplayField::Model => models
                     .iter()
-                    .find(|(name, _)| *name == row.served_model())
+                    .find(|(key, _)| *key == panel::model_color_key(row))
                     .map(|(_, color)| *color)
                     .unwrap_or(theme::TEXT),
                 DisplayField::UpstreamModel | DisplayField::Protocol => theme::TEXT_DIM,
@@ -267,8 +267,8 @@ pub(super) fn draw(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) 
         p.dual_measure(&fonts.small, text)
     });
 
-    let providers = panel::provider_palette(v.rows);
-    let models = panel::model_palette(v.rows);
+    let providers = panel::provider_palette(v.rows, v.name_color_theme);
+    let models = panel::model_palette(v.rows, v.name_color_theme);
 
     let area = m.rows_area();
     p.clip(RectF {

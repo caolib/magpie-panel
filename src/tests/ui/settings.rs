@@ -145,12 +145,12 @@ fn the_fields_tab_offers_a_separate_live_first_checkbox() {
 }
 
 #[test]
-fn the_appearance_tab_offers_opacity_and_fonts_without_overlapping_inputs() {
+fn the_appearance_tab_offers_opacity_themes_and_fonts_without_overlapping_inputs() {
     let mut app = app();
     app.config.opacity = 73;
-    let state = State::default();
-    assert_eq!(state.tab, Tab::Appearance);
     for (width, height) in [(WIDTH, HEIGHT), (MIN_WIDTH, MIN_HEIGHT)] {
+        let mut state = State::default();
+        assert_eq!(state.tab, Tab::Appearance);
         let l = Layout::new(&app, &state, width, height);
         let tab = l
             .controls
@@ -159,31 +159,158 @@ fn the_appearance_tab_offers_opacity_and_fonts_without_overlapping_inputs() {
             .expect("appearance tab");
         assert_eq!(tab.label, "外观");
         let body: Vec<_> = l.controls.iter().filter(|c| c.body).collect();
-        assert_eq!(body.len(), 4);
+        assert_eq!(body.len(), 8);
         assert_eq!(body[0].action, Action::OpacityInput);
         assert_eq!(body[1].action, Action::SaveOpacity);
         assert_eq!(body[1].label, "保存");
         assert_eq!(body[0].rect.y, 32.0);
         assert_eq!(body[1].rect.y, body[0].rect.y);
-        assert_eq!(body[2].action, Action::FontSearch);
-        assert_eq!(body[3].action, Action::FontFamily(String::new()));
-        assert_eq!(l.labels.len(), 6);
+        for (control, theme) in body[2..6].iter().zip(NameColorTheme::ALL) {
+            assert_eq!(control.action, Action::NameColorTheme(theme));
+        }
+        assert_eq!(body[6].action, Action::FontSearch);
+        assert_eq!(body[7].action, Action::FontFamily(String::new()));
+        assert_eq!(l.labels.len(), 8);
         assert_eq!(l.labels[0].text, "面板透明度 · 当前 73%");
         assert_eq!(l.labels[0].rect.y, 0.0);
         assert_eq!(
             l.labels[1].text,
             format!("输入 {OPACITY_MIN}–{OPACITY_MAX} 之间的数值(可含小数),点保存生效")
         );
-        assert_eq!(l.labels[2].text, "当前字体 · 自动选择默认字体");
-        let opacity = l
-            .edit_box_rect(&Action::OpacityInput, 0.0)
-            .expect("opacity");
+        assert_eq!(l.labels[2].text, "名称配色");
+        assert!(l.labels[2].heading);
+        assert_eq!(l.labels[3].text, "仅影响模型名与供应商");
+        assert!(!l.labels[3].heading);
+        assert_eq!(l.labels[4].text, "当前字体 · 自动选择默认字体");
+        for (i, control) in body.iter().enumerate() {
+            let r = control.rect;
+            assert!(r.x >= 24.0 && r.x + r.w <= width - 24.0);
+            assert!(r.y + r.h <= l.content_height);
+            for other in &body[i + 1..] {
+                let s = other.rect;
+                assert!(
+                    r.x + r.w <= s.x || s.x + s.w <= r.x || r.y + r.h <= s.y || s.y + s.h <= r.y,
+                    "{:?} overlaps {:?}",
+                    control.action,
+                    other.action
+                );
+            }
+        }
+        assert!(l.edit_box_rect(&Action::OpacityInput, 0.0).is_some());
+        assert_eq!(
+            l.edit_box_rect(&Action::FontSearch, 0.0).is_some(),
+            height == HEIGHT
+        );
+        l.focus_action(&mut state, Action::FontSearch);
         let search = l
-            .edit_box_rect(&Action::FontSearch, 0.0)
-            .expect("font search");
-        assert!(search.y > opacity.y + opacity.h);
-        assert!(search.y + search.h <= height - FOOTER);
+            .edit_box_rect(&Action::FontSearch, state.scroll)
+            .expect("focused font search is visible, including in a short window");
+        assert!(search.y >= TOP && search.y + search.h <= height - FOOTER);
         assert_eq!(l.max_scroll() > 0.0, height == MIN_HEIGHT);
+    }
+}
+
+#[test]
+fn name_color_theme_buttons_form_one_row_with_exactly_one_selection() {
+    let mut app = app();
+    let state = State::default();
+    for theme in NameColorTheme::ALL {
+        app.config.name_color_theme = theme;
+        for (width, height) in [(WIDTH, HEIGHT), (MIN_WIDTH, MIN_HEIGHT)] {
+            let l = Layout::new(&app, &state, width, height);
+            let buttons: Vec<_> = l
+                .controls
+                .iter()
+                .filter(|c| matches!(c.action, Action::NameColorTheme(_)))
+                .collect();
+            assert_eq!(buttons.len(), 4);
+            assert_eq!(buttons.iter().filter(|c| c.selected).count(), 1);
+            for (index, selected) in NameColorTheme::ALL.into_iter().enumerate() {
+                let c = buttons[index];
+                assert_eq!(c.action, Action::NameColorTheme(selected));
+                assert_eq!(c.label, selected.label());
+                assert_eq!(c.selected, selected == theme);
+                // Selected buttons use the existing filled/outlined style, not checkboxes.
+                assert!(c.body && !c.check && !c.danger);
+                assert_eq!(c.rect.y, buttons[0].rect.y);
+                if index > 0 {
+                    let previous = buttons[index - 1].rect;
+                    assert!(c.rect.x > previous.x + previous.w);
+                }
+                let r = l.screen_rect(c, 0.0);
+                assert!(r.y >= TOP && r.y + r.h <= height - FOOTER);
+                assert_eq!(
+                    l.hit(&state, r.x + r.w / 2.0, r.y + r.h / 2.0),
+                    Some(Action::NameColorTheme(selected))
+                );
+            }
+        }
+    }
+    for tab in [Tab::Fields, Tab::Accounts, Tab::Providers, Tab::Mappings] {
+        let state = State {
+            tab,
+            ..State::default()
+        };
+        let l = Layout::new(&app, &state, WIDTH, HEIGHT);
+        assert!(
+            l.controls
+                .iter()
+                .all(|c| !matches!(c.action, Action::NameColorTheme(_)))
+        );
+    }
+}
+
+#[test]
+fn appearance_scrolling_keeps_theme_hits_and_native_inputs_inside_the_body() {
+    let app = app();
+    let mut state = State {
+        font_names: (0..30)
+            .map(|i| crate::font_catalog::InstalledFont::named(&format!("Font {i}")))
+            .collect(),
+        ..State::default()
+    };
+    state.set_font_query(String::new());
+    for (width, height) in [(WIDTH, HEIGHT), (MIN_WIDTH, MIN_HEIGHT)] {
+        let l = Layout::new(&app, &state, width, height);
+        let close = l
+            .controls
+            .iter()
+            .find(|c| c.action == Action::Close)
+            .unwrap();
+        for step in 0..=20 {
+            state.scroll = l.max_scroll() * step as f32 / 20.0;
+            assert_eq!(l.screen_rect(close, state.scroll).y, close.rect.y);
+            for control in l.controls.iter().filter(|c| c.body) {
+                let r = l.screen_rect(control, state.scroll);
+                let (x, y) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+                if y >= TOP && y < height - FOOTER {
+                    assert_eq!(l.hit(&state, x, y), Some(control.action.clone()));
+                } else {
+                    assert_ne!(l.hit(&state, x, y), Some(control.action.clone()));
+                }
+                if matches!(control.action, Action::OpacityInput | Action::FontSearch) {
+                    assert_eq!(
+                        l.edit_box_rect(&control.action, state.scroll).is_some(),
+                        r.y >= TOP && r.y + r.h <= height - FOOTER
+                    );
+                }
+            }
+        }
+        l.focus_action(&mut state, Action::NameColorTheme(NameColorTheme::Classic));
+        assert!(!state.font_focused());
+        let selected = l
+            .controls
+            .iter()
+            .find(|c| Some(&c.action) == state.focus.as_ref())
+            .unwrap();
+        let rect = l.screen_rect(selected, state.scroll);
+        assert!(rect.y >= TOP && rect.y + rect.h <= height - FOOTER);
+        assert_eq!(l.hit(&state, rect.x + 2.0, rect.y + 2.0), state.focus);
+        l.focus_action(&mut state, Action::OpacityInput);
+        assert!(
+            l.edit_box_rect(&Action::OpacityInput, state.scroll)
+                .is_some()
+        );
     }
 }
 
@@ -274,6 +401,10 @@ fn appearance_keyboard_focus_reaches_opacity_fonts_and_done() {
     for action in [
         Action::OpacityInput,
         Action::SaveOpacity,
+        Action::NameColorTheme(NameColorTheme::Classic),
+        Action::NameColorTheme(NameColorTheme::Soft),
+        Action::NameColorTheme(NameColorTheme::Bright),
+        Action::NameColorTheme(NameColorTheme::CoolWarm),
         Action::FontSearch,
         Action::FontFamily(String::new()),
         Action::Close,
@@ -338,6 +469,8 @@ fn font_search_focus_returns_from_a_scrolled_list_and_survives_filtering() {
     assert!(l.edit_box_rect(&Action::FontSearch, state.scroll).is_some());
     state.set_font_query("Font 29".into());
     let l = Layout::new(&app, &state, MIN_WIDTH, MIN_HEIGHT);
+    // EN_CHANGE restores visibility after filtering resets the scroll.
+    l.focus_action(&mut state, Action::FontSearch);
     assert!(l.edit_box_rect(&Action::FontSearch, state.scroll).is_some());
     l.move_font_focus(&mut state, false);
     assert_eq!(state.focus, Some(Action::FontFamily("Font 29".into())));

@@ -19,6 +19,7 @@ fn view<'a>(rows: &'a [Row], hidden: &'a [DisplayField]) -> ListView<'a> {
         pinned: false,
         filter: crate::model::FILTER_NONE,
         hidden_fields: hidden,
+        name_color_theme: crate::config::NameColorTheme::Classic,
         query: None,
         query_draft: "",
         query_editing: false,
@@ -202,13 +203,61 @@ fn a_provider_keeps_the_colour_the_palette_gave_it() {
         row(r#"{"model":"b","provider":"anthropic"}"#),
     ];
     let v = view(&rows, &[]);
-    let providers = panel::provider_palette(&rows);
+    let providers = panel::provider_palette(&rows, v.name_color_theme);
     let color = Column::Field(DisplayField::Provider).color(&rows[0], &v, &providers, &[]);
     let expected = providers
         .iter()
         .find(|(name, _)| *name == "openai")
         .map(|(_, c)| *c);
     assert_eq!(Some(color), expected);
+}
+
+#[test]
+fn theme_and_model_effort_colours_reach_cells_without_changing_status_colours() {
+    let rows = vec![
+        row(r#"{"model":"a","effort":"high","provider":"X","status":502}"#),
+        row(r#"{"model":"a","effort":"low","provider":"X","status":200}"#),
+        row(r#"{"model":"a","provider":"Y","status":200}"#),
+    ];
+    for theme in crate::config::NameColorTheme::ALL {
+        let mut v = view(&rows, &[]);
+        v.name_color_theme = theme;
+        let providers = panel::provider_palette(&rows, v.name_color_theme);
+        let models = panel::model_palette(&rows, v.name_color_theme);
+        let model = Column::Field(DisplayField::Model);
+        let colours: Vec<_> = rows
+            .iter()
+            .map(|row| model.color(row, &v, &providers, &models))
+            .collect();
+        assert_ne!(colours[0], colours[1]);
+        assert_ne!(colours[1], colours[2]);
+        assert_ne!(colours[0], colours[2]);
+        for row in &rows {
+            let key = panel::model_color_key(row);
+            let expected = models.iter().find(|(name, _)| *name == key).unwrap().1;
+            assert_eq!(model.color(row, &v, &providers, &models), expected);
+        }
+        assert_eq!(
+            Column::Field(DisplayField::Provider).color(&rows[0], &v, &providers, &models),
+            providers[1].1
+        );
+        assert_eq!(
+            Column::Status.color(&rows[0], &v, &providers, &models),
+            theme::RED
+        );
+        assert_eq!(
+            Column::Status.color(&rows[1], &v, &providers, &models),
+            theme::GREEN
+        );
+        assert_eq!(
+            Column::Field(DisplayField::Cache).color(&rows[0], &v, &providers, &models),
+            theme::RED
+        );
+        assert_eq!(
+            Column::Field(DisplayField::Agent).color(&rows[0], &v, &providers, &models),
+            theme::RED
+        );
+    }
 }
 
 #[test]

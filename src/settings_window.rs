@@ -380,9 +380,17 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                 PanelState::with(|s| {
                     if let Some(p) = s.settings.as_mut() {
                         p.ui.set_font_query(query);
-                        p.ui.focus = Some(Action::FontSearch);
                     }
                 });
+                // Filtering resets the scroll. Keep the native search box fully
+                // visible even when the appearance sections fill a short window.
+                if let Some(layout) = layout(hwnd) {
+                    PanelState::with(|s| {
+                        if let Some(p) = s.settings.as_mut() {
+                            layout.focus_action(&mut p.ui, Action::FontSearch);
+                        }
+                    });
+                }
                 sync_edit_boxes(hwnd);
                 invalidate(hwnd);
             }
@@ -819,6 +827,12 @@ fn dispatch(hwnd: HWND, action: Action) {
             PanelState::with(|s| {
                 s.app.config.live_first = !s.app.config.live_first;
                 s.app.rebuild();
+                s.app.save();
+            });
+        }
+        Action::NameColorTheme(theme) => {
+            PanelState::with(|s| {
+                s.app.config.name_color_theme = theme;
                 s.app.save();
             });
         }

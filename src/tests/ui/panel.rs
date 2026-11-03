@@ -34,6 +34,7 @@ fn view<'a>(rows: &'a [Row], accounts: &'a [Account]) -> ListView<'a> {
         pinned: false,
         filter: crate::model::FILTER_NONE,
         hidden_fields: &[],
+        name_color_theme: NameColorTheme::Classic,
         query: None,
         query_draft: "",
         query_editing: false,
@@ -138,6 +139,134 @@ fn hidden_filter_chips_do_not_shift_the_others() {
 }
 
 #[test]
+fn name_colours_follow_first_encounter_from_the_bottom() {
+    let rows = vec![
+        row(r#"{"model":"A","provider":"Y"}"#, "a2"),
+        row(r#"{"model":"B","provider":"X"}"#, "a1"),
+        row(r#"{"model":"A","provider":"X"}"#, "a1"),
+        row(r#"{"model":"A","provider":"Y"}"#, "a1"),
+    ];
+    assert_eq!(
+        model_palette(&rows, NameColorTheme::Classic),
+        vec![(("A", None), theme::CYAN), (("B", None), theme::ORANGE)]
+    );
+    assert_eq!(
+        provider_palette(&rows, NameColorTheme::Classic),
+        vec![("Y", theme::CYAN), ("X", theme::ORANGE)]
+    );
+}
+
+#[test]
+fn new_top_rows_do_not_recolour_names_still_present_below() {
+    let mut rows = vec![
+        row(r#"{"model":"B","provider":"Y"}"#, "a1"),
+        row(r#"{"model":"A","provider":"X"}"#, "a1"),
+    ];
+    for json in [
+        r#"{"model":"A","provider":"X"}"#,
+        r#"{"model":"C","provider":"Z"}"#,
+        r#"{"model":"B","provider":"Y"}"#,
+    ] {
+        rows.insert(0, row(json, "a2"));
+        let models = model_palette(&rows, NameColorTheme::Classic);
+        let providers = provider_palette(&rows, NameColorTheme::Classic);
+        assert_eq!(models[0], (("A", None), theme::CYAN));
+        assert_eq!(models[1], (("B", None), theme::ORANGE));
+        assert_eq!(providers[0], ("X", theme::CYAN));
+        assert_eq!(providers[1], ("Y", theme::ORANGE));
+    }
+    assert_eq!(
+        model_palette(&rows, NameColorTheme::Classic)[2],
+        (("C", None), NAME_PALETTE[2])
+    );
+    assert_eq!(
+        provider_palette(&rows, NameColorTheme::Classic)[2],
+        ("Z", NAME_PALETTE[2])
+    );
+}
+
+#[test]
+fn empty_rows_and_missing_providers_do_not_take_palette_slots() {
+    assert!(model_palette(&[], NameColorTheme::Classic).is_empty());
+    assert!(provider_palette(&[], NameColorTheme::Classic).is_empty());
+    let rows = vec![
+        row(r#"{"model":"A","provider":"X"}"#, "a1"),
+        row(r#"{"model":"A"}"#, "a1"),
+    ];
+    assert_eq!(
+        model_palette(&rows, NameColorTheme::Classic),
+        vec![(("A", None), theme::CYAN)]
+    );
+    assert_eq!(
+        provider_palette(&rows, NameColorTheme::Classic),
+        vec![("X", theme::CYAN)]
+    );
+}
+
+#[test]
+fn every_name_theme_uses_its_palette_in_bottom_up_order() {
+    let rows = vec![
+        row(r#"{"model":"B","provider":"Y"}"#, "a1"),
+        row(r#"{"model":"A","provider":"X"}"#, "a1"),
+    ];
+    for (theme, palette) in [
+        (NameColorTheme::Classic, &NAME_PALETTE[..]),
+        (NameColorTheme::Soft, &SOFT_PALETTE[..]),
+        (NameColorTheme::Bright, &BRIGHT_PALETTE[..]),
+        (NameColorTheme::CoolWarm, &COOL_WARM_PALETTE[..]),
+    ] {
+        assert_eq!(name_palette(theme), palette);
+        assert_eq!(
+            model_palette(&rows, theme),
+            vec![(("A", None), palette[0]), (("B", None), palette[1])]
+        );
+        assert_eq!(
+            provider_palette(&rows, theme),
+            vec![("X", palette[0]), ("Y", palette[1])]
+        );
+        assert!(palette.iter().all(|color| color >> 24 == 0xFF));
+    }
+}
+
+#[test]
+fn model_colours_distinguish_efforts_but_not_routing_brackets() {
+    let rows = vec![
+        row(r#"{"model":"A","effort":"high"}"#, "a1"),
+        row(r#"{"req":"group","model":"A","effort":"low"}"#, "a2"),
+        row(r#"{"model":"A","effort":"low"}"#, "a1"),
+        row(r#"{"model":"A"}"#, "a1"),
+    ];
+    assert_eq!(
+        model_palette(&rows, NameColorTheme::Classic),
+        vec![
+            (("A", None), NAME_PALETTE[0]),
+            (("A", Some("low")), NAME_PALETTE[1]),
+            (("A", Some("high")), NAME_PALETTE[2]),
+        ]
+    );
+    assert_ne!(rows[1].display_model(), rows[2].display_model());
+    assert_eq!(model_color_key(&rows[1]), model_color_key(&rows[2]));
+}
+
+#[test]
+fn name_palette_overflow_does_not_reuse_category_colours() {
+    for theme in NameColorTheme::ALL {
+        let palette = name_palette(theme);
+        let rows: Vec<_> = (0..palette.len() + 2)
+            .rev()
+            .map(|i| row(&format!(r#"{{"model":"M{i}","provider":"P{i}"}}"#), "a1"))
+            .collect();
+        let models = model_palette(&rows, theme);
+        let providers = provider_palette(&rows, theme);
+        for i in 0..rows.len() {
+            let expected = palette.get(i).copied().unwrap_or(theme::TEXT);
+            assert_eq!(models[i].1, expected);
+            assert_eq!(providers[i].1, expected);
+        }
+    }
+}
+
+#[test]
 fn every_column_in_the_table_has_a_distinct_colour_source() {
     let rows = vec![
         row(
@@ -151,8 +280,8 @@ fn every_column_in_the_table_has_a_distinct_colour_source() {
     ];
     let accounts = accounts();
     let v = view(&rows, &accounts);
-    let providers = provider_palette(&rows);
-    let models = model_palette(&rows);
+    let providers = provider_palette(&rows, NameColorTheme::Classic);
+    let models = model_palette(&rows, NameColorTheme::Classic);
     assert_eq!(providers.len(), 2);
     assert_eq!(models.len(), 2);
     assert_ne!(providers[0].1, providers[1].1);
