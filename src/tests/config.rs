@@ -31,16 +31,16 @@ fn name_color_themes_have_stable_labels_and_round_trip_as_camel_case() {
         NameColorTheme::ALL,
         [
             NameColorTheme::Classic,
-            NameColorTheme::Soft,
-            NameColorTheme::Bright,
-            NameColorTheme::CoolWarm,
+            NameColorTheme::Nord,
+            NameColorTheme::OneDark,
+            NameColorTheme::Dracula,
         ]
     );
     for (theme, (label, wire)) in NameColorTheme::ALL.into_iter().zip([
         ("经典", "classic"),
-        ("柔和", "soft"),
-        ("明亮", "bright"),
-        ("冷暖", "coolWarm"),
+        ("Nord", "nord"),
+        ("One Dark", "oneDark"),
+        ("Dracula", "dracula"),
     ]) {
         assert_eq!(theme.label(), label);
         let config = Config {
@@ -59,7 +59,7 @@ fn name_color_themes_have_stable_labels_and_round_trip_as_camel_case() {
 
 #[test]
 fn an_unknown_name_color_theme_falls_back_without_discarding_the_config() {
-    for unknown in ["futureTheme", "", "CLASSIC"] {
+    for unknown in ["futureTheme", "", "CLASSIC", "soft", "bright", "coolWarm"] {
         let config: Config = serde_json::from_value(serde_json::json!({
             "nameColorTheme": unknown,
             "opacity": 73,

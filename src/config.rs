@@ -71,9 +71,9 @@ pub struct Config {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum NameColorTheme {
-    Soft,
-    Bright,
-    CoolWarm,
+    Nord,
+    OneDark,
+    Dracula,
     // Serde requires the fallback variant to be last; ALL defines the UI order.
     #[default]
     #[serde(other)]
@@ -81,14 +81,14 @@ pub enum NameColorTheme {
 }
 
 impl NameColorTheme {
-    pub const ALL: [Self; 4] = [Self::Classic, Self::Soft, Self::Bright, Self::CoolWarm];
+    pub const ALL: [Self; 4] = [Self::Classic, Self::Nord, Self::OneDark, Self::Dracula];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Classic => "经典",
-            Self::Soft => "柔和",
-            Self::Bright => "明亮",
-            Self::CoolWarm => "冷暖",
+            Self::Nord => "Nord",
+            Self::OneDark => "One Dark",
+            Self::Dracula => "Dracula",
         }
     }
 }

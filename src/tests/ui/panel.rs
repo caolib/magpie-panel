@@ -211,9 +211,9 @@ fn every_name_theme_uses_its_palette_in_bottom_up_order() {
     ];
     for (theme, palette) in [
         (NameColorTheme::Classic, &NAME_PALETTE[..]),
-        (NameColorTheme::Soft, &SOFT_PALETTE[..]),
-        (NameColorTheme::Bright, &BRIGHT_PALETTE[..]),
-        (NameColorTheme::CoolWarm, &COOL_WARM_PALETTE[..]),
+        (NameColorTheme::Nord, &NORD_PALETTE[..]),
+        (NameColorTheme::OneDark, &ONE_DARK_PALETTE[..]),
+        (NameColorTheme::Dracula, &DRACULA_PALETTE[..]),
     ] {
         assert_eq!(name_palette(theme), palette);
         assert_eq!(

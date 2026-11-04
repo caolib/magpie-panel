@@ -56,43 +56,44 @@ const NAME_PALETTE: [u32; 9] = [
 ];
 
 /// Alternate name palettes validated against the panel and hover surfaces.
-const SOFT_PALETTE: [u32; 8] = [
-    0xFF56_95D4,
-    0xFFCC_7181,
-    0xFF83_88D6,
-    0xFFCC_7759,
-    0xFFA6_7CC5,
-    0xFFBD_8338,
-    0xFFBF_74A7,
-    0xFFA1_9233,
+/// Each keeps the upstream scheme's accents while dropping its dimmest tints.
+const NORD_PALETTE: [u32; 8] = [
+    0xFF88_C0D0, // nord8 frost
+    0xFFD0_8770, // nord12 aurora orange
+    0xFFEB_CB8B, // nord13 aurora yellow
+    0xFFA3_BE8C, // nord14 aurora green
+    0xFF81_A1C1, // nord9 frost blue
+    0xFFB4_8EAD, // nord15 aurora purple
+    0xFF8F_BCBB, // nord7 frost teal
+    0xFFBF_616A, // nord11 aurora red
 ];
-const BRIGHT_PALETTE: [u32; 8] = [
-    0xFF8B_80F6,
-    0xFFE0_5AAE,
-    0xFFED_6300,
-    0xFFBE_69E2,
-    0xFFF1_566D,
-    0xFF17_A8A9,
-    0xFFBB_893E,
-    0xFF45_A983,
+const ONE_DARK_PALETTE: [u32; 8] = [
+    0xFF61_AFEF, // blue
+    0xFF98_C379, // green
+    0xFFE5_C07B, // yellow
+    0xFFC6_78DD, // purple
+    0xFF56_B6C2, // cyan
+    0xFFE0_6C75, // red
+    0xFFD1_9A66, // orange
+    0xFFAB_B2BF, // foreground
 ];
-const COOL_WARM_PALETTE: [u32; 8] = [
-    0xFF29_A1C1,
-    0xFFDD_667D,
-    0xFF3E_96EA,
-    0xFFCD_6AAF,
-    0xFFC4_8225,
-    0xFF82_85EB,
-    0xFFDD_6D45,
-    0xFFAE_75D6,
+const DRACULA_PALETTE: [u32; 8] = [
+    0xFFFF_79C6, // pink
+    0xFFBD_93F9, // purple
+    0xFF8B_E9FD, // cyan
+    0xFF50_FA7B, // green
+    0xFFFF_B86C, // orange
+    0xFFF1_FA8C, // yellow
+    0xFFFF_5555, // red
+    0xFFFF_9580, // soft red
 ];
 
 fn name_palette(theme: NameColorTheme) -> &'static [u32] {
     match theme {
         NameColorTheme::Classic => &NAME_PALETTE,
-        NameColorTheme::Soft => &SOFT_PALETTE,
-        NameColorTheme::Bright => &BRIGHT_PALETTE,
-        NameColorTheme::CoolWarm => &COOL_WARM_PALETTE,
+        NameColorTheme::Nord => &NORD_PALETTE,
+        NameColorTheme::OneDark => &ONE_DARK_PALETTE,
+        NameColorTheme::Dracula => &DRACULA_PALETTE,
     }
 }
 
