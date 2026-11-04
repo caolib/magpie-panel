@@ -29,6 +29,9 @@ pub enum Tab {
 pub enum Action {
     Tab(Tab),
     Field(DisplayField),
+    /// Reorder one column without changing whether it is shown.
+    MoveField(DisplayField, isize),
+    ResetFieldOrder,
     ShowAllFields,
     LiveFirst,
     GroupByModel,
@@ -119,6 +122,7 @@ pub struct Layout {
     pub height: f32,
     pub controls: Vec<Control>,
     labels: Vec<Label>,
+    disabled: Vec<Action>,
     pub content_height: f32,
     content_top: f32,
 }
@@ -139,6 +143,7 @@ impl Layout {
             height,
             controls: Vec::new(),
             labels: Vec::new(),
+            disabled: Vec::new(),
             content_height: 0.0,
             content_top: TOP,
         };
@@ -240,7 +245,7 @@ impl Layout {
         });
     }
 
-    /// A two-column checkbox row: `checked` means the cell is shown.
+    /// A checkbox row: `checked` means the cell is shown.
     fn checkbox(&mut self, rect: Rect, label: impl Into<String>, action: Action, checked: bool) {
         self.controls.push(Control {
             rect,
@@ -251,24 +256,6 @@ impl Layout {
             body: true,
             check: true,
         });
-    }
-
-    /// Lay checkbox rows out in `columns` columns.
-    fn check_grid(&mut self, y: f32, rows: Vec<(String, Action, bool)>, columns: usize) {
-        let w = (self.width - 48.0 - (columns - 1) as f32 * 6.0) / columns as f32;
-        for (i, (label, action, checked)) in rows.into_iter().enumerate() {
-            self.checkbox(
-                Rect {
-                    x: 24.0 + (i % columns) as f32 * (w + 6.0),
-                    y: y + (i / columns) as f32 * 36.0,
-                    w,
-                    h: 30.0,
-                },
-                label,
-                action,
-                checked,
-            );
-        }
     }
 
     fn label(&mut self, y: f32, text: impl Into<String>, heading: bool) {
@@ -362,7 +349,7 @@ impl Layout {
         self.label(0.0, format!("属性显示 · 已隐藏 {hidden} 项"), true);
         self.label(
             26.0,
-            "勾选显示对应列，取消勾选隐藏；首次默认显示常用字段",
+            "勾选显示对应列，取消勾选隐藏；上移、下移调整列顺序",
             false,
         );
         self.button(
@@ -393,26 +380,65 @@ impl Layout {
             Rect {
                 x: 24.0,
                 y: 98.0,
-                w: self.width - 48.0,
+                w: self.width - 208.0,
                 h: 30.0,
             },
             "按模型分组",
             Action::GroupByModel,
             app.config.group_by_model,
         );
-        let rows = DisplayField::ALL
-            .into_iter()
-            .map(|field| {
-                (
-                    field.label().to_string(),
-                    Action::Field(field),
-                    app.config.shows(field),
-                )
-            })
-            .collect();
-        self.check_grid(144.0, rows, 2);
-        let grid_rows = DisplayField::ALL.len().div_ceil(2);
-        self.content_height = 144.0 + grid_rows as f32 * 36.0;
+        self.button(
+            Rect {
+                x: self.width - 168.0,
+                y: 98.0,
+                w: 144.0,
+                h: 30.0,
+            },
+            "恢复默认顺序",
+            Action::ResetFieldOrder,
+            false,
+            false,
+            true,
+        );
+        let fields = app.config.ordered_fields();
+        let mut y = 144.0;
+        for (index, field) in fields.iter().copied().enumerate() {
+            self.checkbox(
+                Rect {
+                    x: 24.0,
+                    y,
+                    w: self.width - 192.0,
+                    h: 30.0,
+                },
+                field.label(),
+                Action::Field(field),
+                app.config.shows(field),
+            );
+            for (offset, label, x) in [
+                (-1, "上移", self.width - 160.0),
+                (1, "下移", self.width - 88.0),
+            ] {
+                let action = Action::MoveField(field, offset);
+                if (offset == -1 && index == 0) || (offset == 1 && index + 1 == fields.len()) {
+                    self.disabled.push(action.clone());
+                }
+                self.button(
+                    Rect {
+                        x,
+                        y,
+                        w: 64.0,
+                        h: 30.0,
+                    },
+                    label,
+                    action,
+                    false,
+                    false,
+                    true,
+                );
+            }
+            y += 36.0;
+        }
+        self.content_height = y;
     }
 
     fn accounts(&mut self, app: &App) {
@@ -842,22 +868,25 @@ impl Layout {
         self.controls
             .iter()
             .find(|c| {
-                self.available(state, c)
+                self.enabled(state, c)
                     && (!c.body || (y >= self.content_top && y < self.height - FOOTER))
                     && self.screen_rect(c, state.scroll).contains(x, y)
             })
             .map(|c| c.action.clone())
     }
 
-    fn available(&self, state: &State, control: &Control) -> bool {
-        state.pending.is_none() || matches!(control.action, Action::Confirm | Action::Cancel)
+    /// Shared by painting, pointer hits and keyboard focus.
+    pub fn enabled(&self, state: &State, control: &Control) -> bool {
+        !self.disabled.contains(&control.action)
+            && (state.pending.is_none()
+                || matches!(control.action, Action::Confirm | Action::Cancel))
     }
 
     pub fn focus_next(&self, state: &mut State, backwards: bool) {
         let controls: Vec<_> = self
             .controls
             .iter()
-            .filter(|c| self.available(state, c))
+            .filter(|c| self.enabled(state, c))
             .collect();
         if controls.is_empty() {
             return;
@@ -878,7 +907,7 @@ impl Layout {
         let Some(control) = self
             .controls
             .iter()
-            .find(|c| c.action == action && self.available(state, c))
+            .find(|c| c.action == action && self.enabled(state, c))
         else {
             return;
         };
@@ -889,6 +918,22 @@ impl Layout {
                 .min(control.rect.y)
                 .max(control.rect.y + control.rect.h - self.view_height())
                 .clamp(0.0, self.max_scroll());
+        }
+    }
+
+    /// Follow a reordered field, falling back to its checkbox at an endpoint.
+    pub fn focus_moved_field(&self, state: &mut State, field: DisplayField, offset: isize) {
+        state.hover = None;
+        state.pressed = None;
+        let action = Action::MoveField(field, offset);
+        if self
+            .controls
+            .iter()
+            .any(|c| c.action == action && self.enabled(state, c))
+        {
+            self.focus_action(state, action);
+        } else {
+            self.focus_action(state, Action::Field(field));
         }
     }
 
@@ -1003,7 +1048,7 @@ impl Layout {
                 if body && (r.y + r.h <= self.content_top || r.y >= self.height - FOOTER) {
                     continue;
                 }
-                let enabled = self.available(state, c);
+                let enabled = self.enabled(state, c);
                 let hover = enabled && state.hover.as_ref() == Some(&c.action);
                 let focused = enabled && state.focus.as_ref() == Some(&c.action);
                 // A checkbox row keeps the card surface: its state is already

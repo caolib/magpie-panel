@@ -302,6 +302,7 @@ fn a_config_round_trips_through_json() {
         endpoint: "http://127.0.0.1:3425".into(),
     });
     config.hidden_fields = vec![DisplayField::Speed];
+    config.field_order.reverse();
     config.model_aliases.push(NameAlias {
         from: "deepseek".into(),
         to: "ds".into(),
@@ -317,6 +318,8 @@ fn a_config_round_trips_through_json() {
     assert_eq!(back.row_limit, 5);
     assert_eq!(back.accounts[0].name, "本机");
     assert_eq!(back.hidden_fields, vec![DisplayField::Speed]);
+    assert_eq!(back.ordered_fields(), config.ordered_fields());
+    assert!(json.contains("\"fieldOrder\""));
     assert_eq!(back.model_aliases[0].to, "ds");
     assert_eq!(back.provider_aliases[0].to, "A社");
     assert!(back.agent_aliases.is_empty());
@@ -449,6 +452,125 @@ fn columns_toggle_and_show_all_again() {
     config.toggle_field(DisplayField::Cost);
     config.show_all_fields();
     assert!(config.hidden_fields.is_empty());
+}
+
+#[test]
+fn missing_or_empty_column_order_preserves_the_current_default() {
+    for config in [
+        Config::default(),
+        serde_json::from_str::<Config>(r#"{"hiddenFields":["model"]}"#).unwrap(),
+        serde_json::from_str::<Config>(r#"{"fieldOrder":[]}"#).unwrap(),
+    ] {
+        assert_eq!(config.ordered_fields(), DisplayField::ALL);
+    }
+}
+
+#[test]
+fn column_order_discards_duplicates_and_legacy_fields_then_appends_missing_ones() {
+    let config = Config {
+        field_order: vec![
+            DisplayField::CreatedAt,
+            DisplayField::ProviderKey,
+            DisplayField::Model,
+            DisplayField::CreatedAt,
+        ],
+        ..Config::default()
+    };
+    let expected: Vec<_> = [DisplayField::CreatedAt, DisplayField::Model]
+        .into_iter()
+        .chain(
+            DisplayField::ALL
+                .into_iter()
+                .filter(|field| !matches!(field, DisplayField::CreatedAt | DisplayField::Model)),
+        )
+        .collect();
+    assert_eq!(config.ordered_fields(), expected);
+}
+
+#[test]
+fn future_column_names_do_not_discard_other_settings() {
+    let config: Config = serde_json::from_str(
+        r#"{"fieldOrder":["createdAt","futureColumn","model","providerKey","createdAt"],"opacity":75,"hiddenFields":["model"]}"#,
+    )
+    .unwrap();
+    let ordered = config.ordered_fields();
+    assert_eq!(
+        &ordered[..2],
+        &[DisplayField::CreatedAt, DisplayField::Model]
+    );
+    assert_eq!(ordered.len(), DisplayField::ALL.len());
+    assert!(!ordered.contains(&DisplayField::ProviderKey));
+    assert_eq!(config.opacity, 75);
+    assert!(!config.shows(DisplayField::Model));
+}
+
+#[test]
+fn columns_move_one_step_without_changing_visibility() {
+    let mut config = Config::default();
+    let hidden = config.hidden_fields.clone();
+    assert!(config.move_field(DisplayField::UpstreamModel, -1));
+    assert_eq!(
+        &config.ordered_fields()[..3],
+        &[
+            DisplayField::UpstreamModel,
+            DisplayField::Model,
+            DisplayField::Protocol
+        ]
+    );
+    assert_eq!(config.hidden_fields, hidden);
+    assert!(config.move_field(DisplayField::UpstreamModel, 1));
+    assert_eq!(config.ordered_fields(), DisplayField::ALL);
+    assert_eq!(config.hidden_fields, hidden);
+}
+
+#[test]
+fn moving_past_column_boundaries_or_by_invalid_offsets_is_a_noop() {
+    let mut config = Config::default();
+    for (field, offset) in [
+        (DisplayField::Model, -1),
+        (DisplayField::CreatedAt, 1),
+        (DisplayField::ProviderKey, -1),
+        (DisplayField::Model, 0),
+        (DisplayField::Model, 2),
+        (DisplayField::Model, isize::MAX),
+        (DisplayField::Model, isize::MIN),
+    ] {
+        assert!(!config.move_field(field, offset));
+        assert_eq!(config.field_order, DisplayField::ALL);
+    }
+}
+
+#[test]
+fn column_order_reset_and_show_all_are_independent() {
+    let mut config = Config::default();
+    config.field_order.reverse();
+    let hidden = config.hidden_fields.clone();
+    let order = config.ordered_fields();
+    config.toggle_field(DisplayField::Model);
+    config.toggle_field(DisplayField::Model);
+    assert_eq!(config.ordered_fields(), order);
+    config.show_all_fields();
+    assert!(config.hidden_fields.is_empty());
+    assert_eq!(config.ordered_fields(), order);
+    config.hidden_fields = hidden.clone();
+    config.reset_field_order();
+    assert_eq!(config.ordered_fields(), DisplayField::ALL);
+    assert_eq!(config.hidden_fields, hidden);
+}
+
+#[test]
+fn display_field_labels_use_the_requested_names() {
+    for (field, expected) in [
+        (DisplayField::Model, "模型(思考强度)"),
+        (DisplayField::UpstreamModel, "上游回复的模型"),
+        (DisplayField::Protocol, "接口类型"),
+        (DisplayField::Agent, "agent"),
+        (DisplayField::Tokens, "词元"),
+        (DisplayField::Cache, "缓存命中率"),
+        (DisplayField::Cost, "估算费用"),
+    ] {
+        assert_eq!(field.label(), expected);
+    }
 }
 
 #[test]

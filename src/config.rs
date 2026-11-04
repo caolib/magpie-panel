@@ -61,6 +61,9 @@ pub struct Config {
     pub agent_aliases: Vec<NameAlias>,
     /// Table columns the user switched off. Empty means everything is shown.
     pub hidden_fields: Vec<DisplayField>,
+    /// Column order, including hidden columns. Missing fields are appended in default order.
+    #[serde(deserialize_with = "deserialize_field_order")]
+    pub field_order: Vec<DisplayField>,
     /// Put live requests before finished ones, keeping newest first in each group.
     pub live_first: bool,
     /// Group displayed finished rows by model and effort, leaving live slots unchanged.
@@ -169,6 +172,7 @@ impl Default for Config {
             provider_aliases: Vec::new(),
             agent_aliases: Vec::new(),
             hidden_fields: DEFAULT_HIDDEN_FIELDS.to_vec(),
+            field_order: DisplayField::ALL.to_vec(),
             live_first: false,
             group_by_model: false,
             window: WindowState::default(),
@@ -230,8 +234,7 @@ impl AliasKind {
     }
 }
 
-/// One informational table column. Listed in the order the settings window
-/// offers them.
+/// One informational table column. ALL defines the default display order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DisplayField {
@@ -277,7 +280,7 @@ pub enum DisplayField {
 }
 
 impl DisplayField {
-    /// Every column, in settings order.
+    /// Every configurable column, in default order.
     pub const ALL: [DisplayField; 17] = [
         DisplayField::Model,
         DisplayField::UpstreamModel,
@@ -301,18 +304,18 @@ impl DisplayField {
     /// Name shown on the settings checkbox.
     pub fn label(self) -> &'static str {
         match self {
-            DisplayField::Model => "模型",
-            DisplayField::UpstreamModel => "声明模型 · 上游回复",
-            DisplayField::Protocol => "协议 · 接口类型",
-            DisplayField::Agent => "应用 · 发起方",
+            DisplayField::Model => "模型(思考强度)",
+            DisplayField::UpstreamModel => "上游回复的模型",
+            DisplayField::Protocol => "接口类型",
+            DisplayField::Agent => "agent",
             DisplayField::Provider => "供应商",
             DisplayField::ProviderKey => "上游密钥 · 已并入供应商",
-            DisplayField::Tokens => "词元 · Token 数",
-            DisplayField::Cache => "缓存 · 命中率",
+            DisplayField::Tokens => "词元",
+            DisplayField::Cache => "缓存命中率",
             DisplayField::CacheWrite => "写缓存 · 写入词元",
             DisplayField::Speed => "速度 · tps",
             DisplayField::Retry => "重试次数",
-            DisplayField::Cost => "费用 · 估算",
+            DisplayField::Cost => "估算费用",
             DisplayField::Latency => "耗时 · [首字|总]",
             DisplayField::Completion => "补全 · 输出词元",
             DisplayField::Source => "来源 · 入口与主机",
@@ -321,6 +324,18 @@ impl DisplayField {
             DisplayField::CreatedAt => "创建时间",
         }
     }
+}
+
+/// Ignore column names from newer versions without discarding the rest of the config.
+fn deserialize_field_order<'de, D>(deserializer: D) -> Result<Vec<DisplayField>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let names = Vec::<String>::deserialize(deserializer)?;
+    Ok(names
+        .into_iter()
+        .filter_map(|name| serde_json::from_value(serde_json::Value::String(name)).ok())
+        .collect())
 }
 
 /// What is written to the encrypted blob: one gateway key per connection.
@@ -475,6 +490,7 @@ impl Config {
                     if config.period.trim().is_empty() {
                         config.period = "30d".into();
                     }
+                    config.field_order = config.ordered_fields();
                     (config, ConfigLoadStatus::Ok)
                 }
                 Err(_) => {
@@ -603,6 +619,41 @@ impl Config {
         if index < aliases.len() {
             aliases.remove(index);
         }
+    }
+
+    /// Preserve saved positions, discard duplicates/legacy fields and append new columns.
+    pub fn ordered_fields(&self) -> Vec<DisplayField> {
+        let mut fields = Vec::with_capacity(DisplayField::ALL.len());
+        for field in self.field_order.iter().chain(DisplayField::ALL.iter()) {
+            if DisplayField::ALL.contains(field) && !fields.contains(field) {
+                fields.push(*field);
+            }
+        }
+        fields
+    }
+
+    /// Move one column a single step, including when it is hidden.
+    pub fn move_field(&mut self, field: DisplayField, offset: isize) -> bool {
+        if !matches!(offset, -1 | 1) {
+            return false;
+        }
+        let mut fields = self.ordered_fields();
+        let Some(index) = fields.iter().position(|f| *f == field) else {
+            return false;
+        };
+        let Some(target) = index
+            .checked_add_signed(offset)
+            .filter(|i| *i < fields.len())
+        else {
+            return false;
+        };
+        fields.swap(index, target);
+        self.field_order = fields;
+        true
+    }
+
+    pub fn reset_field_order(&mut self) {
+        self.field_order = DisplayField::ALL.to_vec();
     }
 
     /// Whether the table shows this column.

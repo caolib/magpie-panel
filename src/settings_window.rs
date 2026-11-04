@@ -823,6 +823,29 @@ fn dispatch(hwnd: HWND, action: Action) {
             });
             actions.push(PanelAction::RedrawDetail);
         }
+        Action::MoveField(field, offset) => {
+            let moved = PanelState::with(|s| {
+                if !s.app.config.move_field(field, offset) {
+                    return false;
+                }
+                s.app.save();
+                true
+            })
+            .unwrap_or(false);
+            if moved && let Some(layout) = layout(hwnd) {
+                PanelState::with(|s| {
+                    if let Some(p) = s.settings.as_mut() {
+                        layout.focus_moved_field(&mut p.ui, field, offset);
+                    }
+                });
+            }
+        }
+        Action::ResetFieldOrder => {
+            PanelState::with(|s| {
+                s.app.config.reset_field_order();
+                s.app.save();
+            });
+        }
         Action::LiveFirst => {
             PanelState::with(|s| {
                 s.app.config.live_first = !s.app.config.live_first;

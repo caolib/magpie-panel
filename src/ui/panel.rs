@@ -157,6 +157,8 @@ pub struct ListView<'a> {
     pub filter: FilterMask,
     /// Table columns the user switched off.
     pub hidden_fields: &'a [DisplayField],
+    /// All configurable columns in saved order, including hidden ones.
+    pub field_order: Vec<DisplayField>,
     /// Palette for model and provider names; other cell colours stay fixed.
     pub name_color_theme: NameColorTheme,
     /// The text the list was narrowed to, if the header box was submitted.

@@ -92,7 +92,10 @@ cargo run --release
 ## 表格
 
 界面只保留表格：一行一条请求，第一列是状态圆点（成功 / 失败 / 进行中），
-其余列由「设置 → 属性显示」勾选决定。
+其余列由「设置 → 属性显示」勾选决定，并可通过每项的「上移 / 下移」调整左右顺序。
+状态圆点固定最左，详情窗口不受影响。顺序立即生效、全局保存，重启后保留；
+未设置时沿用当前顺序，隐藏或暂时无数据的列重新出现时仍回到设定位置。
+「恢复默认顺序」只重置顺序，「全部显示」只改变显隐。
 
 首次初始化默认显示：模型、发起方、供应商、词元、命中率、tps、重试次数、耗时、创建时间。
 其他字段默认关闭：声明模型、协议、写缓存、费用、补全、来源、连接（可在设置里打开）。
@@ -114,7 +117,7 @@ cargo run --release
 | 页签 | 内容 |
 |---|---|
 | 外观 | 名称配色主题、面板透明度、字体搜索与选择（界面字体与中文回退字体，Ctrl+F 聚焦搜索） |
-| 属性显示 | 逐项开关表格列、进行中请求置顶、按模型分组 |
+| 属性显示 | 逐项开关表格列、上移 / 下移调整列顺序、恢复默认顺序、进行中请求置顶、按模型分组 |
 | 连接 | 添加 / 编辑 / 测试 / 删除 Magpie 连接，清空已保存密钥 |
 | 供应商过滤 | 按（连接，供应商）隐藏不关心的请求 |
 | 名称映射 | 一个界面管理三类显示名缩写：模型、供应商、发起方（应用）。匹配不区分大小写、逐条全部替换，留空即删除匹配 |
@@ -164,11 +167,15 @@ cargo run --release
   "providerAliases": [],      // [{ "from": "Anthropic", "to": "A社" }]
   "agentAliases": [],         // [{ "from": "Claude Code", "to": "CC" }]
   "hiddenFields": ["upstreamModel", "protocol", "cacheWrite", "cost", "completion", "source", "account"],
+  "fieldOrder": ["model", "upstreamModel", "protocol", "agent", "provider", "tokens", "cache", "cacheWrite", "speed", "retry", "cost", "latency", "completion", "source", "error", "account", "createdAt"],
   "liveFirst": false,         // 进行中请求置顶，组内仍按开始时间倒序
   "groupByModel": false,      // 已选出的非进行中记录按模型名与推理强度分组
   "window": { "x": -1, "y": -1, "width": 720, "height": 294 }
 }
 ```
+
+`fieldOrder` 保存所有可配置属性的顺序（包括隐藏项）；缺省或为空时使用默认顺序。
+重复、未知和已合并的属性忽略，缺失或未来新增属性按默认顺序追加末尾。
 
 `x`/`y` 为 `-1` 表示首次运行，自动放到工作区右上角。
 用环境变量 `MAGPIE_PANEL_HOME` 可整体覆盖存储目录，旧变量 `AH_PANEL_HOME` 仍兼容。

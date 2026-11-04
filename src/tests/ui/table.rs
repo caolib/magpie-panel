@@ -19,6 +19,7 @@ fn view<'a>(rows: &'a [Row], hidden: &'a [DisplayField]) -> ListView<'a> {
         pinned: false,
         filter: crate::model::FILTER_NONE,
         hidden_fields: hidden,
+        field_order: DisplayField::ALL.to_vec(),
         name_color_theme: crate::config::NameColorTheme::Classic,
         query: None,
         query_draft: "",
@@ -94,6 +95,78 @@ fn switching_a_column_off_removes_it() {
     assert!(!shown.contains(&DisplayField::Speed));
     assert!(!shown.contains(&DisplayField::Cost));
     assert!(shown.contains(&DisplayField::Model));
+}
+
+#[test]
+fn saved_column_order_keeps_the_status_dot_first() {
+    let rows = [row(FULL)];
+    let mut v = view(&rows, &[]);
+    v.field_order.reverse();
+    let columns = Column::all(&v);
+    assert_eq!(columns[0], Column::Status);
+    let shown: Vec<_> = columns
+        .into_iter()
+        .filter_map(|column| match column {
+            Column::Status => None,
+            Column::Field(field) => Some(field),
+        })
+        .collect();
+    let expected: Vec<_> = fields(&rows, &[]).into_iter().rev().collect();
+    assert_eq!(shown, expected);
+}
+
+#[test]
+fn hidden_and_dynamic_columns_reappear_at_their_saved_positions() {
+    let mut config = crate::config::Config {
+        field_order: vec![
+            DisplayField::Retry,
+            DisplayField::Error,
+            DisplayField::UpstreamModel,
+            DisplayField::Model,
+        ],
+        hidden_fields: DisplayField::ALL
+            .into_iter()
+            .filter(|field| {
+                !matches!(
+                    field,
+                    DisplayField::Retry
+                        | DisplayField::Error
+                        | DisplayField::UpstreamModel
+                        | DisplayField::Model
+                )
+            })
+            .collect(),
+        ..crate::config::Config::default()
+    };
+    let quiet = [row(r#"{"model":"a"}"#)];
+    let mut v = view(&quiet, &config.hidden_fields);
+    v.field_order = config.ordered_fields();
+    assert_eq!(
+        Column::all(&v),
+        vec![Column::Status, Column::Field(DisplayField::Model)]
+    );
+    let rich = [row(r#"{"model":"a","served":"b","status":500,"tries":2}"#)];
+    let mut v = view(&rich, &config.hidden_fields);
+    v.field_order = config.ordered_fields();
+    let expected = vec![
+        Column::Status,
+        Column::Field(DisplayField::Retry),
+        Column::Field(DisplayField::Error),
+        Column::Field(DisplayField::UpstreamModel),
+        Column::Field(DisplayField::Model),
+    ];
+    assert_eq!(Column::all(&v), expected);
+    config.toggle_field(DisplayField::Retry);
+    let mut v = view(&rich, &config.hidden_fields);
+    v.field_order = config.ordered_fields();
+    assert_eq!(
+        Column::all(&v),
+        [expected[..1].to_vec(), expected[2..].to_vec()].concat()
+    );
+    config.toggle_field(DisplayField::Retry);
+    let mut v = view(&rich, &config.hidden_fields);
+    v.field_order = config.ordered_fields();
+    assert_eq!(Column::all(&v), expected);
 }
 
 #[test]

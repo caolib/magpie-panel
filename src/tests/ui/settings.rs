@@ -90,18 +90,53 @@ fn clicking_a_pending_confirmation_is_the_only_way_through() {
 }
 
 #[test]
-fn the_fields_tab_has_one_checkbox_per_column() {
-    let app = app();
+fn the_fields_tab_lists_all_columns_in_normalized_order_including_hidden_ones() {
+    let mut app = app();
+    app.config.field_order = vec![
+        DisplayField::CreatedAt,
+        DisplayField::UpstreamModel,
+        DisplayField::CreatedAt,
+    ];
+    app.config.hidden_fields = vec![DisplayField::CreatedAt, DisplayField::Provider];
     let state = State {
         tab: Tab::Fields,
         ..State::default()
     };
-    let l = Layout::new(&app, &state, WIDTH, HEIGHT);
-    for field in DisplayField::ALL {
-        assert!(
-            l.controls.iter().any(|c| c.action == Action::Field(field)),
-            "{field:?} missing"
+    for (width, height) in [(WIDTH, HEIGHT), (MIN_WIDTH, MIN_HEIGHT)] {
+        let l = Layout::new(&app, &state, width, height);
+        let fields: Vec<_> = l
+            .controls
+            .iter()
+            .filter_map(|c| match c.action {
+                Action::Field(field) => Some((field, c)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fields.len(), DisplayField::ALL.len());
+        assert_eq!(
+            fields.iter().map(|(field, _)| *field).collect::<Vec<_>>(),
+            app.config.ordered_fields()
         );
+        assert_eq!(fields[0].0, DisplayField::CreatedAt);
+        assert_eq!(fields[1].0, DisplayField::UpstreamModel);
+        for (index, (field, checkbox)) in fields.iter().enumerate() {
+            assert!(checkbox.body && checkbox.check);
+            assert_eq!(checkbox.selected, app.config.shows(*field));
+            assert_eq!(checkbox.rect.x, 24.0);
+            assert_eq!(checkbox.rect.y, 144.0 + index as f32 * 36.0);
+            for offset in [-1, 1] {
+                let button = l
+                    .controls
+                    .iter()
+                    .find(|c| c.action == Action::MoveField(*field, offset))
+                    .expect("move button for every column");
+                assert!(button.body && !button.check && !button.danger);
+                assert_eq!(button.label, if offset == -1 { "上移" } else { "下移" });
+                assert_eq!(button.rect.y, checkbox.rect.y);
+                assert!(button.rect.x >= checkbox.rect.x + checkbox.rect.w);
+                assert!(button.rect.x + button.rect.w <= width - 24.0);
+            }
+        }
     }
 }
 
@@ -139,7 +174,7 @@ fn the_fields_tab_offers_a_separate_live_first_checkbox() {
             state.focus = Some(Action::ShowAllFields);
             l.focus_next(&mut state, false);
             assert_eq!(state.focus, Some(Action::LiveFirst));
-            assert_eq!(l.max_scroll() > 0.0, height == MIN_HEIGHT);
+            assert!(l.max_scroll() > 0.0);
         }
     }
 }
@@ -188,10 +223,14 @@ fn the_fields_tab_offers_a_separate_model_grouping_checkbox() {
             l.focus_next(&mut state, false);
             assert_eq!(state.focus, Some(Action::GroupByModel));
             l.focus_next(&mut state, false);
+            assert_eq!(state.focus, Some(Action::ResetFieldOrder));
+            l.focus_next(&mut state, false);
             assert_eq!(state.focus, Some(Action::Field(DisplayField::Model)));
             l.focus_next(&mut state, true);
+            assert_eq!(state.focus, Some(Action::ResetFieldOrder));
+            l.focus_next(&mut state, true);
             assert_eq!(state.focus, Some(Action::GroupByModel));
-            assert_eq!(l.max_scroll() > 0.0, height == MIN_HEIGHT);
+            assert!(l.max_scroll() > 0.0);
             let body: Vec<_> = l.controls.iter().filter(|c| c.body).collect();
             for (i, control) in body.iter().enumerate() {
                 let r = control.rect;
@@ -224,6 +263,242 @@ fn the_fields_tab_offers_a_separate_model_grouping_checkbox() {
         };
         let l = Layout::new(&app, &state, WIDTH, HEIGHT);
         assert!(l.controls.iter().all(|c| c.action != Action::GroupByModel));
+    }
+}
+
+#[test]
+fn reset_order_is_a_separate_button_and_showing_all_keeps_the_order() {
+    let mut app = app();
+    app.config.field_order = DisplayField::ALL.into_iter().rev().collect();
+    let order = app.config.ordered_fields();
+    let hidden = app.config.hidden_fields.clone();
+    let mut state = State {
+        tab: Tab::Fields,
+        ..State::default()
+    };
+    let l = Layout::new(&app, &state, MIN_WIDTH, MIN_HEIGHT);
+    let reset = l
+        .controls
+        .iter()
+        .find(|c| c.action == Action::ResetFieldOrder)
+        .expect("reset order button");
+    assert_eq!(reset.label, "恢复默认顺序");
+    assert!(reset.body && !reset.check && !reset.danger && !reset.selected);
+    let show_all = l
+        .controls
+        .iter()
+        .find(|c| c.action == Action::ShowAllFields)
+        .unwrap();
+    assert_ne!(reset.action, show_all.action);
+    l.focus_action(&mut state, Action::ResetFieldOrder);
+    let rect = l.screen_rect(reset, state.scroll);
+    assert_eq!(
+        l.hit(&state, rect.x + 2.0, rect.y + 2.0),
+        Some(Action::ResetFieldOrder)
+    );
+    assert_eq!(app.config.hidden_fields, hidden);
+    assert_eq!(app.config.ordered_fields(), order);
+
+    app.config.hidden_fields.clear();
+    let l = Layout::new(&app, &state, MIN_WIDTH, MIN_HEIGHT);
+    let fields: Vec<_> = l
+        .controls
+        .iter()
+        .filter_map(|c| match c.action {
+            Action::Field(field) => {
+                assert!(c.selected);
+                Some(field)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(fields, order);
+    assert_eq!(app.config.ordered_fields(), order);
+}
+
+#[test]
+fn only_the_first_up_and_last_down_buttons_are_disabled() {
+    let mut app = app();
+    for reverse in [false, true] {
+        app.config.field_order = if reverse {
+            DisplayField::ALL.into_iter().rev().collect()
+        } else {
+            Vec::new()
+        };
+        let fields = app.config.ordered_fields();
+        for (width, height) in [(WIDTH, HEIGHT), (MIN_WIDTH, MIN_HEIGHT)] {
+            let mut state = State {
+                tab: Tab::Fields,
+                ..State::default()
+            };
+            let l = Layout::new(&app, &state, width, height);
+            for (index, field) in fields.iter().copied().enumerate() {
+                for offset in [-1, 1] {
+                    let action = Action::MoveField(field, offset);
+                    let button = l.controls.iter().find(|c| c.action == action).unwrap();
+                    let enabled =
+                        (offset != -1 || index > 0) && (offset != 1 || index + 1 < fields.len());
+                    assert_eq!(l.enabled(&state, button), enabled);
+                    l.focus_action(&mut state, Action::Field(field));
+                    let scroll = state.scroll;
+                    let rect = l.screen_rect(button, state.scroll);
+                    assert_eq!(
+                        l.hit(&state, rect.x + 2.0, rect.y + 2.0),
+                        enabled.then_some(action.clone())
+                    );
+                    l.focus_action(&mut state, action.clone());
+                    assert_eq!(
+                        state.focus,
+                        Some(if enabled {
+                            action
+                        } else {
+                            Action::Field(field)
+                        })
+                    );
+                    assert_eq!(state.scroll, scroll);
+                }
+            }
+            assert_eq!(
+                l.controls.iter().filter(|c| !l.enabled(&state, c)).count(),
+                2
+            );
+
+            state.pending = Some(Action::ClearKeys);
+            let l = Layout::new(&app, &state, width, height);
+            assert!(l.controls.iter().all(|c| {
+                l.enabled(&state, c) == matches!(c.action, Action::Confirm | Action::Cancel)
+            }));
+            l.focus_action(&mut state, Action::Cancel);
+            l.focus_next(&mut state, false);
+            assert_eq!(state.focus, Some(Action::Confirm));
+            l.focus_next(&mut state, false);
+            assert_eq!(state.focus, Some(Action::Cancel));
+        }
+    }
+}
+
+#[test]
+fn fields_keyboard_navigation_follows_order_skips_endpoints_and_scrolls_rows_into_view() {
+    let mut app = app();
+    app.config.field_order = DisplayField::ALL.into_iter().rev().collect();
+    let fields = app.config.ordered_fields();
+    let mut actions = vec![
+        Action::ShowAllFields,
+        Action::LiveFirst,
+        Action::GroupByModel,
+        Action::ResetFieldOrder,
+    ];
+    for (index, field) in fields.iter().copied().enumerate() {
+        actions.push(Action::Field(field));
+        if index > 0 {
+            actions.push(Action::MoveField(field, -1));
+        }
+        if index + 1 < fields.len() {
+            actions.push(Action::MoveField(field, 1));
+        }
+    }
+    actions.push(Action::Close);
+    for (width, height) in [(WIDTH, HEIGHT), (MIN_WIDTH, MIN_HEIGHT)] {
+        let mut state = State {
+            tab: Tab::Fields,
+            focus: Some(Action::Tab(Tab::Mappings)),
+            ..State::default()
+        };
+        let l = Layout::new(&app, &state, width, height);
+        for action in &actions {
+            l.focus_next(&mut state, false);
+            assert_eq!(state.focus.as_ref(), Some(action));
+            let control = l.controls.iter().find(|c| &c.action == action).unwrap();
+            let rect = l.screen_rect(control, state.scroll);
+            assert!(l.enabled(&state, control));
+            if control.body {
+                assert!(rect.y >= TOP && rect.y + rect.h <= height - FOOTER);
+            }
+            assert_eq!(
+                l.hit(&state, rect.x + 2.0, rect.y + 2.0).as_ref(),
+                Some(action)
+            );
+        }
+        assert!(state.scroll > 0.0);
+        for action in actions.iter().rev().skip(1) {
+            l.focus_next(&mut state, true);
+            assert_eq!(state.focus.as_ref(), Some(action));
+            let control = l.controls.iter().find(|c| &c.action == action).unwrap();
+            let rect = l.screen_rect(control, state.scroll);
+            assert!(rect.y >= TOP && rect.y + rect.h <= height - FOOTER);
+        }
+        l.focus_next(&mut state, true);
+        assert_eq!(state.focus, Some(Action::Tab(Tab::Mappings)));
+    }
+}
+
+#[test]
+fn moving_a_field_keeps_button_focus_and_falls_back_to_its_checkbox_at_endpoints() {
+    for (field, offset, endpoint) in [
+        (DisplayField::Model, 1, false),
+        (DisplayField::CreatedAt, -1, false),
+        (DisplayField::UpstreamModel, -1, true),
+        (DisplayField::Account, 1, true),
+    ] {
+        for (width, height) in [(WIDTH, HEIGHT), (MIN_WIDTH, MIN_HEIGHT)] {
+            let mut app = app();
+            let action = Action::MoveField(field, offset);
+            let mut state = State {
+                tab: Tab::Fields,
+                focus: Some(action.clone()),
+                hover: Some(action.clone()),
+                pressed: Some(action.clone()),
+                ..State::default()
+            };
+            assert!(app.config.move_field(field, offset));
+            let l = Layout::new(&app, &state, width, height);
+            l.focus_moved_field(&mut state, field, offset);
+            let expected = if endpoint {
+                Action::Field(field)
+            } else {
+                action
+            };
+            assert_eq!(state.focus, Some(expected.clone()));
+            assert!(state.hover.is_none() && state.pressed.is_none());
+            let control = l.controls.iter().find(|c| c.action == expected).unwrap();
+            assert!(l.enabled(&state, control));
+            let rect = l.screen_rect(control, state.scroll);
+            assert!(rect.y >= TOP && rect.y + rect.h <= height - FOOTER);
+            assert_eq!(l.hit(&state, rect.x + 2.0, rect.y + 2.0), Some(expected));
+            if matches!(field, DisplayField::CreatedAt | DisplayField::Account) {
+                assert!(state.scroll > 0.0);
+            }
+        }
+    }
+}
+
+#[test]
+fn fields_scrolling_clips_hits_and_keeps_disabled_moves_inert() {
+    let app = app();
+    for (width, height) in [(WIDTH, HEIGHT), (MIN_WIDTH, MIN_HEIGHT)] {
+        let mut state = State {
+            tab: Tab::Fields,
+            ..State::default()
+        };
+        let l = Layout::new(&app, &state, width, height);
+        let close = l
+            .controls
+            .iter()
+            .find(|c| c.action == Action::Close)
+            .unwrap();
+        for step in 0..=20 {
+            state.scroll = l.max_scroll() * step as f32 / 20.0;
+            assert_eq!(l.screen_rect(close, state.scroll).y, close.rect.y);
+            for control in l.controls.iter().filter(|c| c.body) {
+                let rect = l.screen_rect(control, state.scroll);
+                let (x, y) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+                if y >= TOP && y < height - FOOTER && l.enabled(&state, control) {
+                    assert_eq!(l.hit(&state, x, y), Some(control.action.clone()));
+                } else {
+                    assert_ne!(l.hit(&state, x, y), Some(control.action.clone()));
+                }
+            }
+        }
     }
 }
 

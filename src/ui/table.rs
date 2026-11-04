@@ -40,7 +40,7 @@ impl Column {
     /// in the current rows are dropped.
     fn all(v: &ListView) -> Vec<Column> {
         let mut out = vec![Column::Status];
-        for field in DisplayField::ALL {
+        for &field in &v.field_order {
             if !v.shows(field) {
                 continue;
             }

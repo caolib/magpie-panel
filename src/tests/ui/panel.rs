@@ -34,6 +34,7 @@ fn view<'a>(rows: &'a [Row], accounts: &'a [Account]) -> ListView<'a> {
         pinned: false,
         filter: crate::model::FILTER_NONE,
         hidden_fields: &[],
+        field_order: DisplayField::ALL.to_vec(),
         name_color_theme: NameColorTheme::Classic,
         query: None,
         query_draft: "",
