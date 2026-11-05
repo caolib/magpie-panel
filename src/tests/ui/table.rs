@@ -208,6 +208,21 @@ fn retry_cells_distinguish_a_retry_from_a_handover() {
 }
 
 #[test]
+fn live_retries_show_the_attempt_count_and_latest_failure_code() {
+    let mut active: crate::model::ActiveRequest =
+        serde_json::from_str(r#"{"route":9,"started":"2026-10-20T09:00:00Z","model":"gpt-5"}"#)
+            .unwrap();
+    active.trace_attempts = 2;
+    active.trace_status = Some(429);
+    let live = Row::from_active(&active);
+
+    assert_eq!(Column::Field(DisplayField::Retry).text(&live, 0), "1×");
+    assert_eq!(Column::Field(DisplayField::Cache).text(&live, 0), "429");
+    assert_eq!(Column::Field(DisplayField::Error).text(&live, 0), "429");
+    assert!(fields(std::slice::from_ref(&live), &[]).contains(&DisplayField::Retry));
+}
+
+#[test]
 fn source_and_completion_cells_read_as_the_design_describes() {
     let row = row(r#"{"ep":"chat","host":"api.example","out":1200,"reasoning":300}"#);
     assert_eq!(

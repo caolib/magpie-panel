@@ -353,7 +353,7 @@ fn run(
                         // refused it, and that is not a connection failure.
                         match client.concurrency(&target.endpoint, target.key.as_deref()) {
                             Ok(mut active) => {
-                                live_metadata.enrich_live_efforts(
+                                live_metadata.enrich_live_metadata(
                                     &target.endpoint,
                                     target.key.as_deref(),
                                     &mut active,

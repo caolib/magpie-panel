@@ -84,7 +84,7 @@ impl Column {
                     (row.total_tokens() > 0).then(|| fmt::tokens_compact(row.total_tokens()))
                 }
                 // Errors stay compact even if the failed attempt used cache.
-                DisplayField::Cache if row.status == model::Status::Failed => error_code(row),
+                DisplayField::Cache if error_code(row).is_some() => error_code(row),
                 DisplayField::Cache => row.cache_hit_rate().map(|rate| format!("{rate:.2}%")),
                 DisplayField::CacheWrite => (row.write_cached_tokens > 0)
                     .then(|| format!("写 {}", fmt::tokens_compact(row.write_cached_tokens))),
@@ -139,7 +139,7 @@ impl Column {
                     .unwrap_or(theme::CYAN),
                 DisplayField::ProviderKey => theme::TEXT_FAINT,
                 DisplayField::Tokens => theme::TEXT_DIM,
-                DisplayField::Cache if row.status == model::Status::Failed => theme::RED,
+                DisplayField::Cache if error_code(row).is_some() => theme::RED,
                 DisplayField::Cache => match row.cache_hit_rate() {
                     Some(_) if row.cache_hit_is_low() => theme::RED,
                     Some(_) => theme::GREEN,
@@ -228,7 +228,9 @@ fn source_text(row: &Row) -> Option<String> {
 /// Error messages belong in the popup; only the code affects table width.
 fn error_code(row: &Row) -> Option<String> {
     row.status_code
-        .filter(|code| (100..600).contains(code) && row.status == model::Status::Failed)
+        .filter(|code| {
+            (100..600).contains(code) && (row.status == model::Status::Failed || row.live)
+        })
         .map(|code| code.to_string())
 }
 

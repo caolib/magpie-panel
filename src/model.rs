@@ -449,7 +449,7 @@ pub struct Concurrency {
     pub active: Vec<ActiveRequest>,
 }
 
-/// Only the trace metadata needed to enrich live rows; no logs or bodies.
+/// Only the trace metadata needed to enrich live rows; no request/response bodies.
 #[derive(Default, Deserialize)]
 pub struct LiveTracePage {
     #[serde(default)]
@@ -469,6 +469,8 @@ pub struct LiveRoute {
     pub model: Option<String>,
     #[serde(default)]
     pub effort: Option<String>,
+    #[serde(default)]
+    pub tries: Vec<RouteTry>,
 }
 
 impl LiveRoute {
@@ -516,6 +518,16 @@ pub struct ActiveRequest {
     /// Matches a finished row's `route_id`.
     #[serde(default)]
     pub route: Option<i64>,
+    /// Best-effort metadata copied from the local trace endpoint, not wire fields
+    /// of `/concurrency`.
+    #[serde(skip)]
+    pub trace_attempts: i64,
+    #[serde(skip)]
+    pub trace_status: Option<i64>,
+    #[serde(skip)]
+    pub trace_error: Option<String>,
+    #[serde(skip)]
+    pub trace_fail: Option<String>,
 }
 
 fn non_empty(value: Option<&str>) -> Option<String> {
@@ -713,9 +725,9 @@ impl Row {
             account_name: String::new(),
             started_at: active.started.clone(),
             status: Status::Processing,
-            status_code: None,
-            error: None,
-            error_type: None,
+            status_code: active.trace_status,
+            error: active.trace_error.clone(),
+            error_type: non_empty(active.trace_fail.as_deref()),
             agent_id: non_empty(active.agent.as_deref()),
             requested_model: model.clone(),
             model,
@@ -729,7 +741,7 @@ impl Row {
             host: None,
             endpoint: None,
             reasoning_effort: non_empty(active.effort.as_deref()),
-            tries: 0,
+            tries: active.trace_attempts.max(0),
             handed_on: false,
             route_id: active.route,
             rid: None,
@@ -836,7 +848,19 @@ impl Row {
     /// Whether the row opens the detail popup: failures carry a reason worth
     /// reading, and a recovered retry is as interesting as a hard failure.
     pub fn is_error(&self) -> bool {
-        self.status == Status::Failed || self.tries > 1 || self.handed_on
+        self.status == Status::Failed
+            || self.tries > 1
+            || self.handed_on
+            || (self.live
+                && (self.status_code.is_some_and(|status| status >= 400)
+                    || self
+                        .error
+                        .as_deref()
+                        .is_some_and(|error| !error.trim().is_empty())
+                    || self
+                        .error_type
+                        .as_deref()
+                        .is_some_and(|kind| !kind.trim().is_empty())))
     }
 
     /// Sort key: the request's start time in Unix seconds.

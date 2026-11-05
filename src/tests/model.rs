@@ -128,10 +128,14 @@ fn a_failing_status_or_error_marks_the_row_failed() {
 
 #[test]
 fn active_requests_are_live_and_carry_the_client_model() {
-    let active: ActiveRequest = serde_json::from_str(
+    let mut active: ActiveRequest = serde_json::from_str(
         r#"{"id":3,"route":9,"started":"2026-10-20T09:00:00Z","agent":"codex","model":"gpt-5","provider":"openai","ms":850}"#,
     )
     .expect("valid active request");
+    active.trace_attempts = 2;
+    active.trace_status = Some(429);
+    active.trace_fail = Some("rate_limit".into());
+    active.trace_error = Some("try again".into());
     let row = Row::from_active(&active);
     assert_eq!(row.status, Status::Processing);
     assert!(row.live);
@@ -139,6 +143,11 @@ fn active_requests_are_live_and_carry_the_client_model() {
     assert_eq!(row.model, "gpt-5");
     assert_eq!(row.provider.as_deref(), Some("openai"));
     assert_eq!(row.latency_ms, Some(850));
+    assert_eq!(row.tries, 2);
+    assert_eq!(row.status_code, Some(429));
+    assert_eq!(row.error_type.as_deref(), Some("rate_limit"));
+    assert_eq!(row.error.as_deref(), Some("try again"));
+    assert!(row.is_error());
     assert!(row.total_cost.is_none());
 }
 
@@ -231,6 +240,16 @@ fn retries_recovered_on_the_last_attempt_still_open_the_detail() {
 
     let handed = Row::from_record(&record(r#"{"handed_on":true}"#));
     assert!(handed.is_error());
+
+    let mut active = ActiveRequest {
+        trace_attempts: 1,
+        trace_status: Some(429),
+        ..ActiveRequest::default()
+    };
+    assert!(Row::from_active(&active).is_error());
+    active.trace_status = None;
+    active.trace_error = Some("failed before retry".into());
+    assert!(Row::from_active(&active).is_error());
 
     assert!(!Row::from_record(&record("{}")).is_error());
 }
