@@ -1,6 +1,6 @@
 [package]
 name = "magpie-panel"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 rust-version = "1.88"
 description = "Floating desktop panel showing live Magpie gateway requests"
