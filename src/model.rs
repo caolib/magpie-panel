@@ -470,6 +470,8 @@ pub struct LiveRoute {
     #[serde(default)]
     pub effort: Option<String>,
     #[serde(default)]
+    pub order: Vec<RouteCandidate>,
+    #[serde(default)]
     pub tries: Vec<RouteTry>,
 }
 
@@ -528,6 +530,10 @@ pub struct ActiveRequest {
     pub trace_error: Option<String>,
     #[serde(skip)]
     pub trace_fail: Option<String>,
+    #[serde(skip)]
+    pub trace_provider: Option<String>,
+    #[serde(skip)]
+    pub trace_provider_name: Option<String>,
 }
 
 fn non_empty(value: Option<&str>) -> Option<String> {
@@ -714,6 +720,10 @@ impl Row {
     /// cost, so those stay at zero.
     pub fn from_active(active: &ActiveRequest) -> Self {
         let model = non_empty(active.model.as_deref()).unwrap_or_default();
+        let provider_id = non_empty(active.trace_provider.as_deref())
+            .or_else(|| non_empty(active.provider.as_deref()));
+        let provider =
+            non_empty(active.trace_provider_name.as_deref()).or_else(|| provider_id.clone());
         let id = match (active.route, active.id) {
             (Some(route), _) => format!("live:{route}"),
             (None, Some(id)) => format!("live:{id}"),
@@ -732,9 +742,9 @@ impl Row {
             requested_model: model.clone(),
             model,
             served_model: None,
-            provider: non_empty(active.provider.as_deref()),
-            provider_id: non_empty(active.provider.as_deref()),
-            raw_provider: non_empty(active.provider.as_deref()),
+            raw_provider: provider.clone(),
+            provider,
+            provider_id,
             provider_account: None,
             provider_key: None,
             agent: non_empty(active.agent.as_deref()),

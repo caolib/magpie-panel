@@ -231,6 +231,8 @@ fn load_live_metadata(
         request.trace_status = None;
         request.trace_error = None;
         request.trace_fail = None;
+        request.trace_provider = None;
+        request.trace_provider_name = None;
         let mut matches = page.routes.iter().filter(|route| route.matches(request));
         if let Some(route) = matches.next()
             && matches.next().is_none()
@@ -248,6 +250,22 @@ fn load_live_metadata(
                     .map(str::to_string);
             }
             request.trace_attempts = i64::try_from(route.tries.len()).unwrap_or(i64::MAX);
+            // The feed's provider is only the initial route. Candidate order
+            // is not execution order; the last try identifies the actual provider.
+            if let Some(attempt) = route.tries.last().filter(|t| !t.id.trim().is_empty()) {
+                let mut candidates = route.order.iter().filter(|c| c.id == attempt.id);
+                if let Some(candidate) = candidates.next()
+                    && candidates.next().is_none()
+                    && let Some(provider) = candidate
+                        .provider
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty())
+                {
+                    request.trace_provider = Some(provider.to_string());
+                    request.trace_provider_name = candidate.name.clone();
+                }
+            }
             if let Some(failure) = route.tries.iter().rev().find(|attempt| {
                 attempt.status.is_some_and(|status| status >= 400)
                     || attempt
@@ -476,6 +494,88 @@ mod tests {
             assert_eq!(row.tries, 2);
             assert_eq!(row.status_code, Some(429));
             assert!(row.is_error());
+        }
+    }
+
+    fn provider_trace() -> serde_json::Value {
+        serde_json::json!({"routes":[{
+            "id":7,"time":"2026-10-20T09:00:00Z","session":"s","agent":"cli","model":"m",
+            "order":[
+                {"id":"workbuddy","provider":"workbuddy","name":"WorkBuddy"},
+                {"id":"trae-account","provider":"trae-cn","name":"Trae CN"}
+            ],
+            "tries":[{"id":"trae-account","done":false}]
+        }]})
+    }
+
+    #[test]
+    fn live_provider_comes_from_the_current_attempt_not_the_initial_route() {
+        let mut request = live_request();
+        request.provider = Some("workbuddy".into());
+        let mut active = vec![request];
+        load_live_metadata("http://localhost:3425", &mut active, || {
+            Ok(serde_json::from_value(provider_trace()).unwrap())
+        });
+        assert_eq!(active[0].provider.as_deref(), Some("workbuddy"));
+        let row = Row::from_active(&active[0]);
+        assert_eq!(row.provider_id.as_deref(), Some("trae-cn"));
+        assert_eq!(row.provider.as_deref(), Some("Trae CN"));
+        assert_eq!(row.tries, 1);
+        assert!(!row.is_error());
+        let finished = Row::from_record(
+            &serde_json::from_value(serde_json::json!({
+                "provider":"trae-cn","providerName":"Trae CN","status":200
+            }))
+            .unwrap(),
+        );
+        assert_eq!(row.provider, finished.provider);
+        assert_eq!(row.provider_id, finished.provider_id);
+    }
+
+    #[test]
+    fn live_provider_tracks_the_last_attempt_and_not_candidate_order() {
+        let mut page = provider_trace();
+        page["routes"][0]["tries"] = serde_json::json!([
+            {"id":"trae-account","done":true,"status":429},
+            {"id":"workbuddy","done":false}
+        ]);
+        let mut active = vec![live_request()];
+        load_live_metadata("http://localhost:3425", &mut active, || {
+            Ok(serde_json::from_value(page).unwrap())
+        });
+        let row = Row::from_active(&active[0]);
+        assert_eq!(row.provider_id.as_deref(), Some("workbuddy"));
+        assert_eq!(row.provider.as_deref(), Some("WorkBuddy"));
+        assert_eq!(row.tries, 2);
+        assert_eq!(row.status_code, Some(429));
+    }
+
+    #[test]
+    fn live_provider_requires_a_unique_candidate_with_a_provider_id() {
+        for patch in [
+            serde_json::json!({"tries":[]}),
+            serde_json::json!({"tries":[{"id":"missing","done":false}]}),
+            serde_json::json!({"order":[]}),
+            serde_json::json!({"order":[{"id":"trae-account","name":"Trae CN"}]}),
+            serde_json::json!({"order":[
+                {"id":"trae-account","provider":"trae-cn","name":"Trae CN"},
+                {"id":"trae-account","provider":"different","name":"Other"}
+            ]}),
+            serde_json::json!({"time":"2026-10-19T09:00:00Z"}),
+        ] {
+            let mut page = provider_trace();
+            for (key, value) in patch.as_object().unwrap() {
+                page["routes"][0][key] = value.clone();
+            }
+            let mut request = live_request();
+            request.provider = Some("workbuddy".into());
+            let mut active = vec![request];
+            load_live_metadata("http://localhost:3425", &mut active, || {
+                Ok(serde_json::from_value(page).unwrap())
+            });
+            let row = Row::from_active(&active[0]);
+            assert_eq!(row.provider_id.as_deref(), Some("workbuddy"), "{patch}");
+            assert_eq!(row.provider.as_deref(), Some("workbuddy"), "{patch}");
         }
     }
 

@@ -683,6 +683,55 @@ fn live_provider_names_apply_aliases_once_and_reapply_after_edits() {
 }
 
 #[test]
+fn trace_provider_names_take_priority_over_history_and_filter_by_actual_id() {
+    let mut active: crate::model::ActiveRequest =
+        serde_json::from_str(r#"{"route":9,"provider":"workbuddy"}"#).unwrap();
+    active.trace_provider = Some("trae-cn".into());
+    active.trace_provider_name = Some("Current Trae".into());
+    let live = Row::from_active(&active).with_account("a1", "a1");
+    let identity = live.detail_identity();
+    let mut app = app_with(vec![
+        row(
+            r#"{"provider":"workbuddy","providerName":"WorkBuddy"}"#,
+            "a1",
+        ),
+        row(r#"{"provider":"trae-cn","providerName":"Old Trae"}"#, "a1"),
+        live,
+    ]);
+    app.click_filter(Filter::Live);
+    assert_eq!(app.rows[0].provider.as_deref(), Some("Current Trae"));
+    assert_eq!(app.rows[0].provider_id.as_deref(), Some("trae-cn"));
+    assert_eq!(app.rows[0].detail_identity(), identity);
+    app.config.hidden_providers.push(HiddenProvider {
+        account_id: "a1".into(),
+        provider: "workbuddy".into(),
+    });
+    app.rebuild();
+    assert_eq!(app.rows.len(), 1);
+    app.config.hidden_providers[0].provider = "trae-cn".into();
+    app.rebuild();
+    assert!(app.rows.is_empty());
+}
+
+#[test]
+fn trace_provider_ids_without_names_use_matching_history_not_the_initial_provider() {
+    let mut active: crate::model::ActiveRequest =
+        serde_json::from_str(r#"{"route":9,"provider":"workbuddy"}"#).unwrap();
+    active.trace_provider = Some("trae-cn".into());
+    let mut app = app_with(vec![
+        row(
+            r#"{"provider":"workbuddy","providerName":"WorkBuddy"}"#,
+            "a1",
+        ),
+        row(r#"{"provider":"trae-cn","providerName":"Trae CN"}"#, "a1"),
+        Row::from_active(&active).with_account("a1", "a1"),
+    ]);
+    app.click_filter(Filter::Live);
+    assert_eq!(app.rows[0].provider.as_deref(), Some("Trae CN"));
+    assert_eq!(app.rows[0].provider_id.as_deref(), Some("trae-cn"));
+}
+
+#[test]
 fn hidden_providers_are_scoped_to_their_connection() {
     let rows = vec![
         row(r#"{"provider":"openai","model":"a"}"#, "a1"),

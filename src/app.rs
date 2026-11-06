@@ -195,8 +195,8 @@ impl App {
     /// Select the newest filtered rows, optionally prioritizing live requests.
     /// Model grouping only reorders finished rows within that selected page.
     pub fn rebuild(&mut self) {
-        // Concurrency only carries provider ids. Resolve their display names
-        // from the newest named usage row on the same connection, before filtering.
+        // When trace has no display name, resolve provider ids from the newest
+        // named usage row on the same connection, before filtering.
         let mut provider_names = std::collections::HashMap::new();
         for row in self.raw_rows.iter().filter(|row| !row.live) {
             if let (Some(id), Some(name)) =
@@ -217,6 +217,7 @@ impl App {
             .map(|row| {
                 let mut display = row.for_display(&self.config);
                 if row.live
+                    && row.provider == row.provider_id
                     && let Some(id) = row.provider_id.as_deref()
                     && let Some((_, name)) = provider_names.get(&(row.account_id.as_str(), id))
                 {
