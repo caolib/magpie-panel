@@ -205,6 +205,8 @@ GET {endpoint}/v1/magpie/concurrency
 
 - `req` 是客户端请求的模型（可能是别名/分组），`model` 是网关选中的上游模型，
   `served` 是提供方回复里声明的模型。
+- 供应商优先显示 `providerName`；进行中记录只有 `provider` ID 时，用本轮获取的同连接、
+  同 ID 最新历史记录补全名称，没有对应名称则保留 ID。显示名缩写不影响供应商筛选或详情匹配。
 - `in` 不含缓存读取，`cache_read` / `cache_write` 单列；`out` 已包含 `reasoning`，
   不重复相加。
 - `cost` 是估算美元，仅在 `priced: true` 时显示；否则费用列留空。

@@ -557,6 +557,132 @@ fn provider_and_caller_aliases_only_rewrite_display_names() {
 }
 
 #[test]
+fn live_and_finished_requests_share_the_provider_display_name() {
+    let live = live_row(
+        r#"{"route":9,"started":"2026-10-20T09:00:01Z","provider":"workbuddy"}"#,
+        "a1",
+    );
+    let identity = live.detail_identity();
+    let mut app = app_with(vec![
+        row(
+            r#"{"t":"2026-10-20T09:00:00Z","provider":"workbuddy","providerName":"trae cn"}"#,
+            "a1",
+        ),
+        live,
+    ]);
+    app.config.row_limit = 1;
+    app.click_filter(Filter::Live);
+    app.query_draft = "trae cn".into();
+    app.apply_query();
+    assert_eq!(app.rows.len(), 1);
+    assert!(app.rows[0].live);
+    assert_eq!(app.rows[0].provider.as_deref(), Some("trae cn"));
+    assert_eq!(app.rows[0].provider_id.as_deref(), Some("workbuddy"));
+    assert_eq!(app.rows[0].detail_identity(), identity);
+    assert_eq!(app.raw_rows[1].provider.as_deref(), Some("workbuddy"));
+
+    app.click_filter(Filter::All);
+    app.apply_updates(vec![Update::Snapshot {
+        rows: vec![row(
+            r#"{"t":"2026-10-20T09:00:01Z","route_id":9,"provider":"workbuddy","providerName":"trae cn","status":200}"#,
+            "a1",
+        )],
+    }]);
+    assert_eq!(app.rows.len(), 1);
+    assert!(!app.rows[0].live);
+    assert_eq!(app.rows[0].provider.as_deref(), Some("trae cn"));
+}
+
+#[test]
+fn live_provider_names_require_the_same_connection_and_provider_id() {
+    let mut app = app_with(vec![
+        row(r#"{"provider":"workbuddy","providerName":"trae cn"}"#, "a1"),
+        row(
+            r#"{"provider":"workbuddy","providerName":"Other Gateway"}"#,
+            "a2",
+        ),
+        row(r#"{"providerName":"workbuddy"}"#, "a3"),
+        live_row(r#"{"route":1,"provider":"workbuddy"}"#, "a1"),
+        live_row(r#"{"route":2,"provider":"workbuddy"}"#, "a2"),
+        live_row(r#"{"route":3,"provider":"workbuddy"}"#, "a3"),
+        live_row(r#"{"route":4,"provider":"different"}"#, "a1"),
+        live_row(r#"{"route":5}"#, "a1"),
+    ]);
+    app.click_filter(Filter::Live);
+    assert_eq!(
+        app.rows
+            .iter()
+            .map(|r| r.provider.as_deref())
+            .collect::<Vec<_>>(),
+        [
+            Some("trae cn"),
+            Some("Other Gateway"),
+            Some("workbuddy"),
+            Some("different"),
+            None
+        ]
+    );
+    app.config.hidden_providers.push(HiddenProvider {
+        account_id: "a1".into(),
+        provider: "workbuddy".into(),
+    });
+    app.rebuild();
+    assert!(!app.rows.iter().any(|r| r.id == "live:1"));
+    assert!(app.rows.iter().any(|r| r.id == "live:2"));
+}
+
+#[test]
+fn live_provider_names_use_the_newest_named_record_not_input_order() {
+    let rows = vec![
+        row(
+            r#"{"t":"2026-10-20T09:00:02Z","provider":"workbuddy"}"#,
+            "a1",
+        ),
+        row(
+            r#"{"t":"2026-10-20T09:00:01Z","provider":"workbuddy","providerName":"trae cn"}"#,
+            "a1",
+        ),
+        row(
+            r#"{"t":"2026-10-20T09:00:00Z","provider":"workbuddy","providerName":"Old Name"}"#,
+            "a1",
+        ),
+        live_row(r#"{"route":9,"provider":"workbuddy"}"#, "a1"),
+    ];
+    for rows in [rows.clone(), rows.into_iter().rev().collect()] {
+        let mut app = app_with(rows);
+        app.click_filter(Filter::Live);
+        assert_eq!(app.rows[0].provider.as_deref(), Some("trae cn"));
+    }
+}
+
+#[test]
+fn live_provider_names_apply_aliases_once_and_reapply_after_edits() {
+    let mut app = app_with(vec![
+        row(r#"{"provider":"workbuddy","providerName":"trae cn"}"#, "a1"),
+        live_row(r#"{"route":9,"provider":"workbuddy"}"#, "a1"),
+    ]);
+    app.config.provider_aliases = vec![NameAlias {
+        from: "trae".into(),
+        to: "trae alias".into(),
+    }];
+    for _ in 0..2 {
+        app.rebuild();
+        assert!(
+            app.rows
+                .iter()
+                .all(|r| r.provider.as_deref() == Some("trae alias cn"))
+        );
+    }
+    app.config.provider_aliases[0].to = "T".into();
+    app.rebuild();
+    assert!(
+        app.rows
+            .iter()
+            .all(|r| r.provider.as_deref() == Some("T cn"))
+    );
+}
+
+#[test]
 fn hidden_providers_are_scoped_to_their_connection() {
     let rows = vec![
         row(r#"{"provider":"openai","model":"a"}"#, "a1"),

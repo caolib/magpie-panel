@@ -195,10 +195,36 @@ impl App {
     /// Select the newest filtered rows, optionally prioritizing live requests.
     /// Model grouping only reorders finished rows within that selected page.
     pub fn rebuild(&mut self) {
+        // Concurrency only carries provider ids. Resolve their display names
+        // from the newest named usage row on the same connection, before filtering.
+        let mut provider_names = std::collections::HashMap::new();
+        for row in self.raw_rows.iter().filter(|row| !row.live) {
+            if let (Some(id), Some(name)) =
+                (row.provider_id.as_deref(), row.raw_provider.as_deref())
+            {
+                let age = row.age_key();
+                let entry = provider_names
+                    .entry((row.account_id.as_str(), id))
+                    .or_insert((age, name));
+                if age > entry.0 {
+                    *entry = (age, name);
+                }
+            }
+        }
         let mut rows: Vec<_> = self
             .raw_rows
             .iter()
-            .map(|row| row.for_display(&self.config))
+            .map(|row| {
+                let mut display = row.for_display(&self.config);
+                if row.live
+                    && let Some(id) = row.provider_id.as_deref()
+                    && let Some((_, name)) = provider_names.get(&(row.account_id.as_str(), id))
+                {
+                    display.provider =
+                        Some(model::apply_aliases(name, &self.config.provider_aliases));
+                }
+                display
+            })
             .collect();
 
         let hidden = &self.config.hidden_providers;
