@@ -59,10 +59,8 @@ fn maps_every_wire_field_the_table_renders() {
     assert_eq!(row.provider_id.as_deref(), Some("anthropic"));
     assert_eq!(row.provider_account.as_deref(), Some("team"));
     assert_eq!(row.provider_key.as_deref(), Some("main-key"));
-    assert_eq!(
-        row.provider_with_key().as_deref(),
-        Some("Anthropic(main-key)")
-    );
+    assert!(row.multi_account_providers.is_empty());
+    assert_eq!(row.provider_label().as_deref(), Some("Anthropic(main-key)"));
     assert_eq!(row.agent.as_deref(), Some("Claude Code"));
     assert_eq!(row.host.as_deref(), Some("api.anthropic.com"));
     assert_eq!(row.tries, 2);
@@ -80,18 +78,128 @@ fn the_provider_cell_carries_the_key_name_in_parentheses() {
     let both = Row::from_record(&record(
         r#"{"providerName":"Anthropic","providerKeyName":"k"}"#,
     ));
-    assert_eq!(both.provider_with_key().as_deref(), Some("Anthropic(k)"));
+    assert_eq!(both.provider_label().as_deref(), Some("Anthropic(k)"));
 
     let provider_only = Row::from_record(&record(r#"{"providerName":"Anthropic"}"#));
-    assert_eq!(
-        provider_only.provider_with_key().as_deref(),
-        Some("Anthropic")
-    );
+    assert_eq!(provider_only.provider_label().as_deref(), Some("Anthropic"));
 
     let key_only = Row::from_record(&record(r#"{"providerKeyName":"k"}"#));
-    assert_eq!(key_only.provider_with_key().as_deref(), Some("(k)"));
+    assert_eq!(key_only.provider_label().as_deref(), Some("(k)"));
 
-    assert_eq!(Row::from_record(&record("{}")).provider_with_key(), None);
+    assert_eq!(Row::from_record(&record("{}")).provider_label(), None);
+}
+
+#[test]
+fn multi_account_provider_shows_account_before_the_key_without_changing_identity() {
+    for (account, key, expected) in [
+        (Some("team"), None, "Provider(team)"),
+        (
+            Some("user@example.com"),
+            Some("key"),
+            "Provider(user@example.com)",
+        ),
+        (Some("  team  "), None, "Provider(team)"),
+        (Some("  "), Some("key"), "Provider(key)"),
+        (None, Some("key"), "Provider(key)"),
+        (None, None, "Provider"),
+    ] {
+        let record = serde_json::from_value(serde_json::json!({
+            "providerName": "Provider", "providerAccount": account, "providerKeyName": key
+        }))
+        .unwrap();
+        let mut row = Row::from_record(&record);
+        let identity = row.detail_identity();
+        row.multi_account_providers = Arc::new(HashSet::from(["Provider".into()]));
+        assert_eq!(row.provider_label().as_deref(), Some(expected));
+        assert_eq!(row.detail_identity(), identity);
+    }
+    let row = Row::from_record(&record(r#"{"providerAccount":"team"}"#));
+    assert_eq!(row.provider_label(), None);
+    assert_eq!(row.provider_account.as_deref(), Some("team"));
+}
+
+#[test]
+fn single_account_labels_are_hidden_but_keys_and_raw_accounts_remain() {
+    for (json, expected) in [
+        (
+            r#"{"provider":"p","providerName":"Provider","providerAccount":"only"}"#,
+            "Provider",
+        ),
+        (
+            r#"{"provider":"p","providerName":"Provider","providerAccount":"only","providerKeyName":"key"}"#,
+            "Provider(key)",
+        ),
+    ] {
+        let row = Row::from_record(&record(json));
+        assert_eq!(row.provider_label().as_deref(), Some(expected));
+        assert_eq!(row.provider_account.as_deref(), Some("only"));
+        assert_eq!(
+            row.detail_identity().provider_account.as_deref(),
+            Some("only")
+        );
+    }
+}
+
+#[test]
+fn account_visibility_uses_each_raw_supplier_identity_before_aliasing() {
+    let config = crate::config::Config {
+        provider_aliases: vec![crate::config::NameAlias {
+            from: "Provider".into(),
+            to: "P".into(),
+        }],
+        ..Default::default()
+    };
+    let multi_account_providers = Arc::new(HashSet::from(["multi".into(), "Provider".into()]));
+    for (json, expected) in [
+        (
+            r#"{"provider":"multi","providerName":"Provider","providerAccount":"a"}"#,
+            "P(a)",
+        ),
+        (
+            r#"{"provider":"multi","providerName":"Renamed","providerAccount":"b"}"#,
+            "Renamed(b)",
+        ),
+        (
+            r#"{"provider":"single","providerName":"Provider","providerAccount":"only"}"#,
+            "P",
+        ),
+        (
+            r#"{"providerName":"Provider","providerAccount":"fallback"}"#,
+            "P(fallback)",
+        ),
+    ] {
+        let mut raw = Row::from_record(&record(json));
+        raw.multi_account_providers = Arc::clone(&multi_account_providers);
+        let shown = raw.for_display(&config);
+        assert_eq!(shown.provider_label().as_deref(), Some(expected));
+        assert_eq!(shown.detail_identity(), raw.detail_identity());
+        assert!(Arc::ptr_eq(
+            &shown.multi_account_providers,
+            &multi_account_providers
+        ));
+    }
+    let mut fallback = Row::from_record(&record(
+        r#"{"providerName":"Provider","providerAccount":"a"}"#,
+    ));
+    fallback.raw_provider = None;
+    fallback.multi_account_providers = multi_account_providers;
+    assert_eq!(fallback.provider_label().as_deref(), Some("Provider(a)"));
+}
+
+#[test]
+fn active_accounts_use_the_same_visibility_rule_as_history() {
+    let active = ActiveRequest {
+        trace_provider: Some("p".into()),
+        trace_provider_name: Some("Provider".into()),
+        trace_provider_account: Some("team".into()),
+        ..Default::default()
+    };
+    let mut row = Row::from_active(&active);
+    assert!(row.multi_account_providers.is_empty());
+    assert_eq!(row.provider_label().as_deref(), Some("Provider"));
+    row.multi_account_providers = Arc::new(HashSet::from(["p".into()]));
+    assert_eq!(row.provider_label().as_deref(), Some("Provider(team)"));
+    assert_eq!(row.provider_account.as_deref(), Some("team"));
 }
 
 #[test]
@@ -357,6 +465,9 @@ fn detail_identity_separates_accounts_routes_and_provider_attempts() {
     b.provider_key = Some("other-key-name".into());
     assert_ne!(a.detail_identity(), b.detail_identity());
     b = a.clone();
+    b.provider_account = Some("other-account".into());
+    assert_ne!(a.detail_identity(), b.detail_identity());
+    b = a.clone();
     b.route_id = Some(78);
     assert_ne!(a.detail_identity(), b.detail_identity());
 }
@@ -394,12 +505,42 @@ fn trace_keeps_repeated_candidates_and_does_not_invent_success() {
     assert_eq!(detail.attempts[0].error.as_deref(), Some("first"));
     assert_eq!(detail.attempts[1].error.as_deref(), Some("second"));
     assert_eq!(detail.attempts[0].provider.as_deref(), Some("Provider"));
+    assert_eq!(detail.attempts[0].provider_id.as_deref(), Some("p"));
     assert_eq!(
         detail.attempts[0].provider_key.as_deref(),
         Some("friendly-name")
     );
     assert_eq!(detail.attempts[3].status_code, None);
     assert_eq!(detail.attempts[3].done, None);
+}
+
+#[test]
+fn attempts_keep_raw_provider_ids_and_use_unmapped_names_only_as_fallback() {
+    for (json, id, identity) in [
+        (
+            r#"{"provider":"p","providerName":"Provider","providerAccount":"team"}"#,
+            Some("p"),
+            Some("p"),
+        ),
+        (
+            r#"{"providerName":"Provider","providerAccount":"team"}"#,
+            None,
+            Some("Provider"),
+        ),
+        (r#"{"providerAccount":"team"}"#, None, None),
+    ] {
+        let attempt = Attempt::from_record(&record(json));
+        assert_eq!(attempt.provider_id.as_deref(), id);
+        assert_eq!(attempt.provider_identity(), identity);
+        assert_eq!(attempt.provider_account.as_deref(), Some("team"));
+    }
+    let route: Route = serde_json::from_str(r#"{"id":77,"order":[{"id":"a","provider":"p","name":"Provider","kind":"account","who":"team"},{"id":"b","name":"Fallback","kind":"account","who":"other"}],"tries":[{"id":"a"},{"id":"b"},{"id":"missing"}]}"#).unwrap();
+    let detail = ExecutionDetail::from_route(&route, &detail_row());
+    assert_eq!(detail.attempts[0].provider_id.as_deref(), Some("p"));
+    assert_eq!(detail.attempts[0].provider_identity(), Some("p"));
+    assert_eq!(detail.attempts[1].provider_id, None);
+    assert_eq!(detail.attempts[1].provider_identity(), Some("Fallback"));
+    assert_eq!(detail.attempts[2].provider_identity(), None);
 }
 
 #[test]

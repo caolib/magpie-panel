@@ -5,6 +5,7 @@
 //! routes (default `127.0.0.1:3425`). Loopback requests need no credentials;
 //! a gateway shared over the network needs a Magpie gateway key.
 
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::time::{Duration, Instant};
 
@@ -19,6 +20,46 @@ const MAX_JSON_BYTES: u64 = 8 * 1024 * 1024;
 const DETAIL_PAGE_SIZE: usize = 500;
 const DETAIL_MAX_PAGES: usize = 4;
 const DETAIL_BUDGET: Duration = Duration::from_secs(20);
+
+/// Cached subscription accounts only. No token, key, balance or error fields
+/// are retained, and `kept=1` never asks a vendor to refresh its quota.
+#[derive(Default, serde::Deserialize)]
+struct AccountInventory {
+    #[serde(default)]
+    data: Vec<SubscriptionAccount>,
+}
+
+#[derive(serde::Deserialize)]
+struct SubscriptionAccount {
+    #[serde(default)]
+    provider: String,
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    user: Option<String>,
+}
+
+fn subscription_accounts(inventory: AccountInventory) -> HashMap<String, HashSet<String>> {
+    let mut accounts: HashMap<String, HashSet<String>> = HashMap::new();
+    for entry in inventory.data {
+        let provider = entry.provider.trim();
+        if entry.kind != "subscription" || provider.is_empty() {
+            continue;
+        }
+        if let Some(user) = entry
+            .user
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            accounts
+                .entry(provider.into())
+                .or_default()
+                .insert(user.into());
+        }
+    }
+    accounts
+}
 
 /// Every failure the panel can show, with the message already localized.
 #[derive(Debug, Clone)]
@@ -82,6 +123,17 @@ impl Client {
             limit.clamp(1, 500)
         );
         self.get_json(&url, key)
+    }
+
+    /// Best-effort inventory on the same gateway listener; never refresh quotas
+    /// or fall back to a console port when permissions deny it.
+    pub fn provider_accounts(
+        &self,
+        endpoint: &str,
+        key: Option<&str>,
+    ) -> Result<HashMap<String, HashSet<String>>, ApiError> {
+        let url = format!("{}/v1/magpie/quotas?kept=1", endpoint.trim_end_matches('/'));
+        self.get_json(&url, key).map(subscription_accounts)
     }
 
     /// The in-flight requests. A restricted gateway key is refused this
@@ -233,6 +285,8 @@ fn load_live_metadata(
         request.trace_fail = None;
         request.trace_provider = None;
         request.trace_provider_name = None;
+        request.trace_provider_account = None;
+        request.trace_provider_key = None;
         let mut matches = page.routes.iter().filter(|route| route.matches(request));
         if let Some(route) = matches.next()
             && matches.next().is_none()
@@ -264,6 +318,11 @@ fn load_live_metadata(
                 {
                     request.trace_provider = Some(provider.to_string());
                     request.trace_provider_name = candidate.name.clone();
+                    match candidate.kind.as_deref() {
+                        Some("account") => request.trace_provider_account = candidate.who.clone(),
+                        Some("key") => request.trace_provider_key = candidate.who.clone(),
+                        _ => {}
+                    }
                 }
             }
             if let Some(failure) = route.tries.iter().rev().find(|attempt| {
@@ -438,6 +497,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn account_inventory_counts_distinct_subscription_users_not_api_keys() {
+        let inventory = serde_json::from_value(serde_json::json!({"data":[
+            {"provider":"multi", "kind":"subscription", "user":" first "},
+            {"provider":"multi", "kind":"subscription", "user":"first"},
+            {"provider":"multi", "kind":"subscription", "user":"second"},
+            {"provider":"single", "kind":"subscription", "user":"first"},
+            {"provider":"multi", "kind":"subscription", "user":" "},
+            {"provider":" ", "kind":"subscription", "user":"ignored"},
+            {"provider":"api", "kind":"plan", "user":"key-one"},
+            {"provider":"api", "kind":"balance", "user":"key-two"},
+            {"provider":"unknown", "kind":"subscription"}
+        ]}))
+        .unwrap();
+        let accounts = subscription_accounts(inventory);
+        assert_eq!(accounts.len(), 2);
+        assert_eq!(accounts["multi"].len(), 2);
+        assert_eq!(accounts["single"].len(), 1);
+        assert!(subscription_accounts(serde_json::from_str("{}").unwrap()).is_empty());
+    }
+
+    #[test]
     fn period_values_keep_their_punctuation() {
         assert_eq!(encode_query("last:24h"), "last:24h");
         assert_eq!(
@@ -548,6 +628,54 @@ mod tests {
         assert_eq!(row.provider.as_deref(), Some("WorkBuddy"));
         assert_eq!(row.tries, 2);
         assert_eq!(row.status_code, Some(429));
+    }
+
+    #[test]
+    fn live_account_and_key_labels_follow_the_actual_attempt_and_clear_on_switch() {
+        let mut active = vec![live_request()];
+        for (kind, who, expected_account, expected_key, expected_label) in [
+            ("account", "first", Some("first"), None, "Trae CN(first)"),
+            (
+                "account",
+                " second ",
+                Some("second"),
+                None,
+                "Trae CN(second)",
+            ),
+            (
+                "key",
+                "main-key",
+                None,
+                Some("main-key"),
+                "Trae CN(main-key)",
+            ),
+            ("provider", "not-an-account", None, None, "Trae CN"),
+            ("account", " ", None, None, "Trae CN"),
+        ] {
+            let mut page = provider_trace();
+            page["routes"][0]["order"][0]["kind"] = serde_json::json!("account");
+            page["routes"][0]["order"][0]["who"] = serde_json::json!("not-the-current-account");
+            page["routes"][0]["order"][1]["kind"] = serde_json::json!(kind);
+            page["routes"][0]["order"][1]["who"] = serde_json::json!(who);
+            load_live_metadata("http://localhost:3425", &mut active, || {
+                Ok(serde_json::from_value(page).unwrap())
+            });
+            let mut row = Row::from_active(&active[0]);
+            row.multi_account_providers = std::sync::Arc::new(HashSet::from(["trae-cn".into()]));
+            assert_eq!(row.provider_account.as_deref(), expected_account);
+            assert_eq!(row.provider_key.as_deref(), expected_key);
+            assert_eq!(row.provider_label().as_deref(), Some(expected_label));
+        }
+        active[0].trace_provider_account = Some("stale-account".into());
+        active[0].trace_provider_key = Some("stale-key".into());
+        let mut page = provider_trace();
+        page["routes"][0]["tries"] = serde_json::json!([{"id":"missing"}]);
+        load_live_metadata("http://localhost:3425", &mut active, || {
+            Ok(serde_json::from_value(page).unwrap())
+        });
+        let row = Row::from_active(&active[0]);
+        assert!(row.provider_account.is_none());
+        assert!(row.provider_key.is_none());
     }
 
     #[test]

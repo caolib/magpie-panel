@@ -1,8 +1,8 @@
 //! Table layout: one row per request, one column per visible cell.
 //!
-//! Every column is sized to its widest text, so nothing is truncated, and the
-//! width the table needs is reported back to the caller, which widens the
-//! window to match.
+//! Columns fit their widest text, except the supplier cell, which has a
+//! density-scaled cap and ellipsis for long account names. The table reports
+//! the width it needs so the caller can fit the window.
 
 use windows::Win32::Graphics::GdiPlus::RectF;
 
@@ -19,6 +19,9 @@ const CELL_HPAD: f32 = 1.0;
 /// Headroom added to the rectangle a cell is drawn in: GDI+ trims text the
 /// moment the layout rectangle is narrower than the measured text.
 const CELL_SLACK: f32 = 0.5;
+
+/// Full supplier column width at base density, including horizontal padding.
+const PROVIDER_MAX_WIDTH: f32 = 180.0;
 
 /// The status cell is a dot, not a word.
 const STATUS_DOT: &str = "●";
@@ -76,7 +79,7 @@ impl Column {
                     .map(str::to_string),
                 DisplayField::Protocol => protocol_text(row),
                 DisplayField::Agent => text(row.agent.as_deref()),
-                DisplayField::Provider => row.provider_with_key(),
+                DisplayField::Provider => row.provider_label(),
                 // Only reachable through an old config; the key now rides in
                 // the provider cell.
                 DisplayField::ProviderKey => text(row.provider_key.as_deref()),
@@ -234,13 +237,42 @@ fn error_code(row: &Row) -> Option<String> {
         .map(|code| code.to_string())
 }
 
-/// Width of every column: the widest cell under it, plus the padding on both
-/// sides. Pure so the fit can be exercised without a device context.
+/// Ellipsize only at UTF-8 character boundaries. Measure the entire candidate
+/// because mixed Latin/CJK font runs have their own overhang allowances.
+fn ellipsize(text: &str, max_width: f32, measure: impl Fn(&str) -> f32) -> String {
+    if measure(text) <= max_width {
+        return text.into();
+    }
+    let suffix = if text.ends_with(')') { "…)" } else { "…" };
+    if measure(suffix) > max_width {
+        return if measure("…") <= max_width {
+            "…".into()
+        } else {
+            String::new()
+        };
+    }
+    let boundaries: Vec<_> = text.char_indices().map(|(index, _)| index).collect();
+    let (mut low, mut high) = (0, boundaries.len());
+    while low < high {
+        let mid = (low + high) / 2;
+        let candidate = format!("{}{}", &text[..boundaries[mid]], suffix);
+        if measure(&candidate) <= max_width {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    let end = low.checked_sub(1).map_or(0, |index| boundaries[index]);
+    format!("{}{}", &text[..end], suffix)
+}
+
+/// Width of every column: widest cell plus padding, with a supplier cap.
+/// Pure so the fit can be exercised without a device context.
 fn column_widths(
     rows: &[Row],
     columns: &[Column],
     now: i64,
-    hpad: f32,
+    scale: f32,
     measure: impl Fn(&str) -> f32,
 ) -> Vec<f32> {
     columns
@@ -250,7 +282,12 @@ fn column_widths(
             for row in rows {
                 width = width.max(measure(&column.text(row, now)));
             }
-            width + hpad * 2.0
+            let padded = width + CELL_HPAD * scale * 2.0;
+            if *column == Column::Field(DisplayField::Provider) {
+                padded.min(PROVIDER_MAX_WIDTH * scale)
+            } else {
+                padded
+            }
         })
         .collect()
 }
@@ -265,7 +302,7 @@ pub(super) fn draw(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) 
 
     let hpad = CELL_HPAD * m.scale;
     let columns = Column::all(v);
-    let widths = column_widths(v.rows, &columns, v.now, hpad, |text| {
+    let widths = column_widths(v.rows, &columns, v.now, m.scale, |text| {
         p.dual_measure(&fonts.small, text)
     });
 
@@ -291,9 +328,17 @@ pub(super) fn draw(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) 
         }
         let mut x = rect.x;
         for (column, width) in columns.iter().zip(&widths) {
+            let text = column.text(row, v.now);
+            let text = if *column == Column::Field(DisplayField::Provider) {
+                ellipsize(&text, (width - hpad * 2.0).max(0.0), |s| {
+                    p.dual_measure(&fonts.small, s)
+                })
+            } else {
+                text
+            };
             p.dual_text(
                 &fonts.small,
-                &column.text(row, v.now),
+                &text,
                 x + hpad,
                 rect.y,
                 width - hpad * 2.0 + CELL_SLACK * m.scale,

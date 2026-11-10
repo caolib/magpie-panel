@@ -2,11 +2,14 @@
 //! first line and the wrapped log on full-width lines below. The worker adds
 //! matched trace attempts or an incomplete ledger summary.
 
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
 use windows::Win32::Graphics::GdiPlus::RectF;
 
 use crate::format as fmt;
 use crate::model::{
-    Attempt, DetailSource, ExecutionDetail, Row, apply_aliases, display_model_name,
+    Attempt, DetailSource, ExecutionDetail, Row, apply_aliases, display_model_name, provider_label,
 };
 use crate::theme::{self, Fonts, Painter};
 use crate::ui::layout::Rect;
@@ -128,17 +131,24 @@ pub struct Entry {
 }
 
 impl Entry {
-    fn from_attempt(attempt: &Attempt, config: &crate::config::Config) -> Self {
+    fn from_attempt(
+        attempt: &Attempt,
+        config: &crate::config::Config,
+        multi_account_providers: &HashSet<String>,
+    ) -> Self {
+        let show_account = attempt
+            .provider_identity()
+            .is_some_and(|provider| multi_account_providers.contains(provider));
         let provider = attempt
             .provider
             .as_deref()
             .map(|p| apply_aliases(p, &config.provider_aliases));
-        let provider = match (provider, attempt.provider_key.as_deref()) {
-            (Some(p), Some(k)) => format!("{p}({k})"),
-            (Some(p), None) => p,
-            (None, Some(k)) => format!("({k})"),
-            _ => fmt::BLANK.into(),
-        };
+        let provider = provider_label(
+            provider.as_deref(),
+            attempt.provider_account.as_deref().filter(|_| show_account),
+            attempt.provider_key.as_deref(),
+        )
+        .unwrap_or_else(|| fmt::BLANK.into());
         let kinds: Vec<_> = [attempt.fail.as_deref(), attempt.error_type.as_deref()]
             .into_iter()
             .flatten()
@@ -183,7 +193,11 @@ impl Entry {
         }
     }
 
-    fn from_row(row: &Row, config: &crate::config::Config) -> Self {
+    fn from_row(
+        row: &Row,
+        config: &crate::config::Config,
+        multi_account_providers: &HashSet<String>,
+    ) -> Self {
         Self::from_attempt(
             &Attempt {
                 model: row.model.clone(),
@@ -191,12 +205,15 @@ impl Entry {
                 error: row.error.clone(),
                 error_type: row.error_type.clone(),
                 provider: row.provider.clone(),
+                provider_id: row.provider_identity().map(str::to_string),
+                provider_account: row.provider_account.clone(),
                 provider_key: row.provider_key.clone(),
                 handed_on: row.handed_on,
                 done: Some(row.status != crate::model::Status::Processing),
                 ..Default::default()
             },
             config,
+            multi_account_providers,
         )
     }
 
@@ -223,10 +240,35 @@ impl Doc {
         detail: &ExecutionDetail,
         config: &crate::config::Config,
     ) -> Self {
+        // The current connection decides normal visibility. Historical retries
+        // may additionally reveal accounts no longer present in its live data.
+        let mut multi_account_providers = Arc::clone(&raw.multi_account_providers);
+        let mut first_accounts = HashMap::new();
+        for (provider, account) in detail
+            .attempts
+            .iter()
+            .map(|a| (a.provider_identity(), a.provider_account.as_deref()))
+            .chain(std::iter::once((
+                raw.provider_identity(),
+                raw.provider_account.as_deref(),
+            )))
+        {
+            let (Some(provider), Some(account)) = (
+                provider,
+                account.map(str::trim).filter(|account| !account.is_empty()),
+            ) else {
+                continue;
+            };
+            if *first_accounts.entry(provider).or_insert(account) != account
+                && !multi_account_providers.contains(provider)
+            {
+                Arc::make_mut(&mut multi_account_providers).insert(provider.to_string());
+            }
+        }
         let mut rows: Vec<_> = detail
             .attempts
             .iter()
-            .map(|a| Entry::from_attempt(a, config))
+            .map(|a| Entry::from_attempt(a, config, &multi_account_providers))
             .collect();
         // Show the selected ledger row immediately, or retain a reason the trace
         // did not contain. Do not repeat a final summary already in the attempts.
@@ -252,12 +294,16 @@ impl Doc {
                     .as_deref()
                     .is_none_or(|provider| a.provider.as_deref().is_none_or(|p| p == provider))
                 && raw
+                    .provider_account
+                    .as_deref()
+                    .is_none_or(|account| a.provider_account.as_deref() == Some(account))
+                && raw
                     .provider_key
                     .as_deref()
                     .is_none_or(|key| a.provider_key.as_deref().is_none_or(|k| k == key))
         });
         if rows.is_empty() || missing_reason || !selected_recorded {
-            rows.push(Entry::from_row(raw, config));
+            rows.push(Entry::from_row(raw, config, &multi_account_providers));
         }
         if let Some(error) = detail
             .route_error
@@ -265,7 +311,7 @@ impl Doc {
             .filter(|e| !e.trim().is_empty())
             && !rows.iter().any(|r| r.log.contains(error))
         {
-            let mut entry = Entry::from_row(raw, config);
+            let mut entry = Entry::from_row(raw, config, &multi_account_providers);
             entry.code = detail
                 .route_status
                 .filter(|s| (100..600).contains(s))

@@ -13,6 +13,9 @@
 //! * `cost` is an *estimate* in USD, and `priced == false` means no price basis
 //!   was found. A zero cost is therefore not "free".
 
+use std::collections::HashSet;
+use std::sync::Arc;
+
 use serde::Deserialize;
 
 /// Strips the vendor prefix from a model id: `openai/gpt-5` -> `gpt-5`.
@@ -20,6 +23,25 @@ pub fn short_model_name(model: &str) -> &str {
     match model.rsplit_once('/') {
         Some((_, name)) => name,
         None => model,
+    }
+}
+
+/// One supplier cell: prefer the subscription account, otherwise the upstream
+/// key name. These are display labels, never credentials or provider aliases.
+pub fn provider_label(
+    provider: Option<&str>,
+    account: Option<&str>,
+    key: Option<&str>,
+) -> Option<String> {
+    let suffix = account
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| key.map(str::trim).filter(|s| !s.is_empty()));
+    match (provider, suffix) {
+        (Some(provider), Some(suffix)) => Some(format!("{provider}({suffix})")),
+        (Some(provider), None) => Some(provider.to_string()),
+        (None, Some(suffix)) => Some(format!("({suffix})")),
+        (None, None) => None,
     }
 }
 
@@ -258,11 +280,22 @@ pub struct Attempt {
     pub error: Option<String>,
     pub error_type: Option<String>,
     pub provider: Option<String>,
+    /// Raw supplier identity, never a display alias.
+    pub provider_id: Option<String>,
+    pub provider_account: Option<String>,
     pub provider_key: Option<String>,
     pub handed_on: bool,
 }
 
 impl Attempt {
+    /// The fallback name is still raw; aliases are applied only while rendering.
+    pub fn provider_identity(&self) -> Option<&str> {
+        self.provider_id
+            .as_deref()
+            .or(self.provider.as_deref())
+            .filter(|provider| !provider.trim().is_empty())
+    }
+
     pub fn from_record(record: &UsageRecord) -> Self {
         let row = Row::from_record(record);
         Self {
@@ -272,6 +305,8 @@ impl Attempt {
             error: row.error,
             error_type: row.error_type,
             provider: row.provider,
+            provider_id: row.provider_id,
+            provider_account: row.provider_account,
             provider_key: row.provider_key,
             handed_on: row.handed_on,
             ..Self::default()
@@ -337,6 +372,10 @@ impl ExecutionDetail {
                     provider: candidate.and_then(|c| {
                         non_empty(c.name.as_deref()).or_else(|| non_empty(c.provider.as_deref()))
                     }),
+                    provider_id: candidate.and_then(|c| non_empty(c.provider.as_deref())),
+                    provider_account: candidate
+                        .filter(|c| c.kind.as_deref() == Some("account"))
+                        .and_then(|c| non_empty(c.who.as_deref())),
                     provider_key: candidate
                         .filter(|c| c.kind.as_deref() == Some("key"))
                         .and_then(|c| non_empty(c.who.as_deref())),
@@ -534,6 +573,10 @@ pub struct ActiveRequest {
     pub trace_provider: Option<String>,
     #[serde(skip)]
     pub trace_provider_name: Option<String>,
+    #[serde(skip)]
+    pub trace_provider_account: Option<String>,
+    #[serde(skip)]
+    pub trace_provider_key: Option<String>,
 }
 
 fn non_empty(value: Option<&str>) -> Option<String> {
@@ -571,6 +614,8 @@ pub struct Row {
     pub provider_id: Option<String>,
     /// Immutable display-name fallback for detail identity when id is absent.
     pub raw_provider: Option<String>,
+    /// Suppliers with multiple accounts on this connection, keyed by raw id/name.
+    pub multi_account_providers: Arc<HashSet<String>>,
     pub provider_account: Option<String>,
     pub provider_key: Option<String>,
     /// The agent's display name, falling back to its id.
@@ -638,15 +683,25 @@ impl Row {
         row
     }
 
-    /// `provider(key)`: the provider with Magpie's upstream key name appended,
-    /// so one table cell carries both. Either side may be missing.
-    pub fn provider_with_key(&self) -> Option<String> {
-        match (self.provider.as_deref(), self.provider_key.as_deref()) {
-            (Some(provider), Some(key)) => Some(format!("{provider}({key})")),
-            (Some(provider), None) => Some(provider.to_string()),
-            (None, Some(key)) => Some(format!("({key})")),
-            (None, None) => None,
-        }
+    /// Raw supplier id/name for account grouping, unaffected by display aliases.
+    pub fn provider_identity(&self) -> Option<&str> {
+        self.provider_id
+            .as_deref()
+            .or(self.raw_provider.as_deref())
+            .or(self.provider.as_deref())
+            .filter(|provider| !provider.trim().is_empty())
+    }
+
+    /// Only multi-account suppliers show accounts; API-key labels stay visible.
+    pub fn provider_label(&self) -> Option<String> {
+        let show_account = self
+            .provider_identity()
+            .is_some_and(|provider| self.multi_account_providers.contains(provider));
+        provider_label(
+            self.provider.as_deref(),
+            self.provider_account.as_deref().filter(|_| show_account),
+            self.provider_key.as_deref(),
+        )
     }
 
     pub fn from_record(record: &UsageRecord) -> Self {
@@ -689,6 +744,7 @@ impl Row {
                 .or_else(|| non_empty(record.provider.as_deref())),
             provider_id: non_empty(record.provider.as_deref()),
             raw_provider: non_empty(record.provider_name.as_deref()),
+            multi_account_providers: Arc::default(),
             provider_account: non_empty(record.provider_account.as_deref()),
             provider_key: non_empty(record.provider_key_name.as_deref()),
             agent: non_empty(record.agent_name.as_deref())
@@ -745,8 +801,9 @@ impl Row {
             raw_provider: provider.clone(),
             provider,
             provider_id,
-            provider_account: None,
-            provider_key: None,
+            multi_account_providers: Arc::default(),
+            provider_account: non_empty(active.trace_provider_account.as_deref()),
+            provider_key: non_empty(active.trace_provider_key.as_deref()),
             agent: non_empty(active.agent.as_deref()),
             host: None,
             endpoint: None,

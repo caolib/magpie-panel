@@ -8,6 +8,8 @@
 //! missing effort can also read bounded trace metadata. Finished rows keep
 //! Magpie's semantics; the UI sorts the merged rows by its display settings.
 
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
@@ -20,6 +22,9 @@ use tracing::warn;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 /// Optional live metadata must not add a full request timeout to every poll.
 const LIVE_METADATA_TIMEOUT: Duration = Duration::from_secs(2);
+/// Account inventories change much less often than requests; failed reads are
+/// throttled too and keep the last known inventory until the connection changes.
+const ACCOUNT_INVENTORY_INTERVAL: Duration = Duration::from_secs(60);
 /// Longest sleep, so queued commands are noticed promptly without spinning.
 const TICK: Duration = Duration::from_millis(200);
 /// Rows fetched per poll before the local status filter and row limit are
@@ -192,6 +197,61 @@ fn fetch_limit(row_limit: i64) -> i64 {
 }
 
 #[derive(Default)]
+struct ProviderAccounts {
+    accounts: HashMap<String, HashSet<String>>,
+    next_read: Option<Instant>,
+}
+
+impl ProviderAccounts {
+    fn refresh(
+        &mut self,
+        now: Instant,
+        read: impl FnOnce() -> Result<HashMap<String, HashSet<String>>, crate::client::ApiError>,
+    ) {
+        if self.next_read.is_some_and(|next| now < next) {
+            return;
+        }
+        self.next_read = Some(now + ACCOUNT_INVENTORY_INTERVAL);
+        if let Ok(accounts) = read() {
+            self.accounts = accounts;
+        }
+    }
+
+    /// Runs per connection, before search/status filters and visible row limits.
+    /// Known inventories win over old accounts in history; when unavailable,
+    /// distinct recorded accounts are the best evidence we have.
+    fn annotate(&self, rows: &mut [Row]) {
+        let mut observed: HashMap<&str, HashSet<&str>> = HashMap::new();
+        for row in rows.iter() {
+            if let (Some(provider), Some(account)) = (
+                row.provider_id
+                    .as_deref()
+                    .or(row.raw_provider.as_deref())
+                    .or(row.provider.as_deref()),
+                row.provider_account.as_deref(),
+            ) {
+                observed.entry(provider).or_default().insert(account);
+            }
+        }
+        let mut multiple: HashSet<String> = self
+            .accounts
+            .iter()
+            .filter(|(_, accounts)| accounts.len() > 1)
+            .map(|(provider, _)| provider.clone())
+            .collect();
+        for (provider, accounts) in observed {
+            if !self.accounts.contains_key(provider) && accounts.len() > 1 {
+                multiple.insert(provider.into());
+            }
+        }
+        let multiple = Arc::new(multiple);
+        for row in rows {
+            row.multi_account_providers = multiple.clone();
+        }
+    }
+}
+
+#[derive(Default)]
 struct DetailQueue {
     revision: u64,
     latest: Option<u64>,
@@ -289,6 +349,8 @@ fn run(
     let mut pending_probe: Option<String> = None;
     let mut details = DetailQueue::default();
     let mut next_poll = Instant::now();
+    let mut provider_accounts: HashMap<String, ProviderAccounts> = HashMap::new();
+    let mut inventory_revision = details.revision;
     // Last reported connection health, so `Update::Accounts` only goes out when
     // something actually changed.
     let mut reported: Option<(Vec<String>, Vec<AccountIssue>)> = None;
@@ -334,6 +396,12 @@ fn run(
         if force || Instant::now() >= next_poll {
             force = false;
             let mut cycle = Cycle::default();
+            // SetTargets advances the detail revision even for same-id endpoint
+            // or credential edits; never carry another gateway's inventory over.
+            if inventory_revision != details.revision {
+                provider_accounts.clear();
+                inventory_revision = details.revision;
+            }
 
             for target in targets.iter() {
                 match client.usage(
@@ -369,6 +437,11 @@ fn run(
                                 warn!("读取实时请求失败 ({}): {}", target.name, err.message());
                             }
                         }
+                        let inventory = provider_accounts.entry(target.id.clone()).or_default();
+                        inventory.refresh(Instant::now(), || {
+                            live_metadata.provider_accounts(&target.endpoint, target.key.as_deref())
+                        });
+                        inventory.annotate(&mut rows);
                         cycle.rows.extend(rows);
                         cycle.open.push(target.id.clone());
                     }

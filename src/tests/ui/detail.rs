@@ -8,7 +8,7 @@ fn row(json: &str) -> Row {
 
 const FULL: &str = r#"{
   "t":"2026-10-20T09:00:00Z","agentName":"app-secret","providerName":"Anthropic",
-  "providerAccount":"account-secret","providerKeyName":"main","host":"host-secret",
+  "providerAccount":"team","providerKeyName":"main","host":"host-secret",
   "ep":"endpoint-secret","req":"requested-secret","model":"vendor/model","served":"served-secret",
   "effort":"effort-secret","in":1000,"out":200,"cache_read":4000,"cache_write":500,
   "ms":5000,"status":502,"err":"upstream said no","tries":2,"handed_on":true,"route_id":77,
@@ -30,7 +30,6 @@ fn details_only_contain_the_five_requested_fields() {
     }
     for unwanted in [
         "app-secret",
-        "account-secret",
         "host-secret",
         "endpoint-secret",
         "requested-secret",
@@ -83,6 +82,227 @@ fn recovered_success_keeps_each_failure_and_final_result_in_order() {
 }
 
 #[test]
+fn trace_and_history_show_each_attempts_account_without_aliasing_it() {
+    let raw = row(
+        r#"{"providerName":"Provider","providerAccount":"Provider-b","model":"m","status":200,"tries":2}"#,
+    );
+    let route: Route = serde_json::from_value(serde_json::json!({
+        "id":77, "done":true,
+        "order":[
+            {"id":"a","name":"Provider","kind":"account","who":"Provider-a"},
+            {"id":"b","name":"Provider","kind":"account","who":"Provider-b"}
+        ],
+        "tries":[
+            {"id":"a","model":"m","done":true,"status":429},
+            {"id":"b","model":"m","done":true,"status":200}
+        ]
+    }))
+    .unwrap();
+    let config = Config {
+        provider_aliases: vec![NameAlias {
+            from: "Provider".into(),
+            to: "P".into(),
+        }],
+        ..Default::default()
+    };
+    let mut detail = ExecutionDetail::from_route(&route, &raw);
+    assert!(detail.attempts.iter().all(|a| a.provider_key.is_none()));
+    let doc = Doc::with_detail(&raw, &detail, &config);
+    assert_eq!(
+        doc.rows
+            .iter()
+            .map(|r| r.provider.as_str())
+            .collect::<Vec<_>>(),
+        ["P(Provider-a)", "P(Provider-b)"]
+    );
+    assert!(plain_text(&doc).contains("供应商: P(Provider-b)"));
+
+    detail.source = DetailSource::History;
+    detail.attempts = [
+        r#"{"providerName":"Provider","providerAccount":"Provider-a","model":"m","status":429}"#,
+        r#"{"providerName":"Provider","providerAccount":"Provider-b","model":"m","status":200}"#,
+    ]
+    .into_iter()
+    .map(|json| Attempt::from_record(&serde_json::from_str(json).unwrap()))
+    .collect();
+    let doc = Doc::with_detail(&raw, &detail, &config);
+    assert_eq!(
+        doc.rows
+            .iter()
+            .map(|r| r.provider.as_str())
+            .collect::<Vec<_>>(),
+        ["P(Provider-a)", "P(Provider-b)"]
+    );
+}
+
+#[test]
+fn loading_details_preserve_connection_visibility_and_key_fallback() {
+    let config = Config {
+        provider_aliases: vec![NameAlias {
+            from: "Provider".into(),
+            to: "P".into(),
+        }],
+        ..Default::default()
+    };
+    for (json, expected) in [
+        (
+            r#"{"provider":"multi","providerName":"Provider","providerAccount":"team","providerKeyName":"key"}"#,
+            "P(team)",
+        ),
+        (
+            r#"{"providerName":"Provider","providerAccount":"team"}"#,
+            "P(team)",
+        ),
+        (
+            r#"{"provider":"single","providerName":"Provider","providerAccount":"only"}"#,
+            "P",
+        ),
+        (
+            r#"{"provider":"single","providerName":"Provider","providerAccount":"only","providerKeyName":"key"}"#,
+            "P(key)",
+        ),
+    ] {
+        let mut raw = row(json);
+        raw.multi_account_providers = Arc::new(HashSet::from(["multi".into(), "Provider".into()]));
+        let doc = Doc::with_detail(&raw, &ExecutionDetail::loading(), &config);
+        assert_eq!(doc.rows[0].provider, expected);
+    }
+}
+
+#[test]
+fn trace_uses_selected_connections_multi_account_set_for_each_supplier() {
+    let mut raw = row(
+        r#"{"provider":"multi","providerName":"Provider","providerAccount":"a","status":200,"model":"m"}"#,
+    );
+    raw.multi_account_providers = Arc::new(HashSet::from(["multi".into()]));
+    let route: Route = serde_json::from_str(r#"{"id":77,"done":true,"order":[{"id":"q","provider":"single","name":"Provider","kind":"account","who":"only"},{"id":"p","provider":"multi","name":"Provider","kind":"account","who":"a"}],"tries":[{"id":"q","model":"m","done":true,"status":429},{"id":"p","model":"m","done":true,"status":200}]}"#).unwrap();
+    let doc = Doc::with_detail(
+        &raw,
+        &ExecutionDetail::from_route(&route, &raw),
+        &Config::default(),
+    );
+    assert_eq!(doc.rows.len(), 2);
+    assert_eq!(doc.rows[0].provider, "Provider");
+    assert_eq!(doc.rows[1].provider, "Provider(a)");
+}
+
+#[test]
+fn trace_and_history_only_expand_suppliers_with_distinct_accounts() {
+    let raw = row(
+        r#"{"provider":"p","providerName":"Provider","providerAccount":"b","model":"m","status":200}"#,
+    );
+    let route: Route = serde_json::from_value(serde_json::json!({
+        "id":77, "done":true,
+        "order":[
+            {"id":"a","provider":"p","name":"OldProvider","kind":"account","who":"a"},
+            {"id":"single","provider":"q","name":"Provider","kind":"account","who":"only"},
+            {"id":"key","provider":"q","name":"Provider","kind":"key","who":"key"},
+            {"id":"unknown-a","kind":"account","who":"unknown-a"},
+            {"id":"unknown-b","name":"  ","kind":"account","who":"unknown-b"},
+            {"id":"b","provider":"p","name":"Provider","kind":"account","who":"b"}
+        ],
+        "tries":[
+            {"id":"a","model":"m","status":429},
+            {"id":"single","model":"m","status":429},
+            {"id":"key","model":"m","status":429},
+            {"id":"unknown-a","model":"m","status":429},
+            {"id":"unknown-b","model":"m","status":429},
+            {"id":"b","model":"m","done":true,"status":200}
+        ]
+    }))
+    .unwrap();
+    let config = Config {
+        provider_aliases: vec![NameAlias {
+            from: "Provider".into(),
+            to: "P".into(),
+        }],
+        ..Default::default()
+    };
+    let mut history = ExecutionDetail::loading();
+    history.source = DetailSource::History;
+    history.attempts = [
+        r#"{"provider":"p","providerName":"OldProvider","providerAccount":"a","model":"m","status":429}"#,
+        r#"{"provider":"q","providerName":"Provider","providerAccount":"only","model":"m","status":429}"#,
+        r#"{"provider":"q","providerName":"Provider","providerKeyName":"key","model":"m","status":429}"#,
+        r#"{"providerAccount":"unknown-a","model":"m","status":429}"#,
+        r#"{"providerName":"  ","providerAccount":"unknown-b","model":"m","status":429}"#,
+        r#"{"provider":"p","providerName":"Provider","providerAccount":"b","model":"m","status":200}"#,
+    ]
+    .into_iter()
+    .map(|json| Attempt::from_record(&serde_json::from_str(json).unwrap()))
+    .collect();
+    for detail in [ExecutionDetail::from_route(&route, &raw), history] {
+        let doc = Doc::with_detail(&raw, &detail, &config);
+        assert_eq!(
+            doc.rows
+                .iter()
+                .map(|entry| entry.provider.as_str())
+                .collect::<Vec<_>>(),
+            ["OldP(a)", "P", "P(key)", fmt::BLANK, fmt::BLANK, "P(b)"]
+        );
+        assert!(raw.multi_account_providers.is_empty());
+    }
+}
+
+#[test]
+fn repeated_or_blank_accounts_do_not_make_a_supplier_multi_account() {
+    let raw = row(
+        r#"{"provider":"p","providerName":"Provider","providerAccount":"same","model":"m","status":200}"#,
+    );
+    let mut detail = ExecutionDetail::loading();
+    detail.attempts = [Some("same"), Some(" same "), Some(" "), None]
+        .into_iter()
+        .map(|account| Attempt {
+            provider_id: Some("p".into()),
+            provider: Some("Provider".into()),
+            provider_account: account.map(str::to_string),
+            model: "m".into(),
+            status_code: Some(200),
+            ..Default::default()
+        })
+        .collect();
+    let doc = Doc::with_detail(&raw, &detail, &Config::default());
+    assert_eq!(doc.rows.len(), 4);
+    assert!(doc.rows.iter().all(|entry| entry.provider == "Provider"));
+}
+
+#[test]
+fn selected_row_and_historical_retry_jointly_reveal_both_accounts() {
+    let raw = row(
+        r#"{"provider":"p","providerName":"Provider","providerAccount":"selected","model":"m","status":200}"#,
+    );
+    let mut detail = ExecutionDetail::loading();
+    detail.attempts.push(Attempt::from_record(&serde_json::from_str(
+        r#"{"provider":"p","providerName":"Provider","providerAccount":"earlier","model":"m","status":429}"#,
+    ).unwrap()));
+    let doc = Doc::with_detail(&raw, &detail, &Config::default());
+    assert_eq!(doc.rows.len(), 2);
+    assert_eq!(doc.rows[0].provider, "Provider(earlier)");
+    assert_eq!(doc.rows[1].provider, "Provider(selected)");
+    assert!(raw.multi_account_providers.is_empty());
+}
+
+#[test]
+fn trace_cannot_hide_a_selected_account_when_another_or_no_account_is_recorded() {
+    let mut raw =
+        row(r#"{"providerName":"P","providerAccount":"selected","model":"m","status":200}"#);
+    raw.multi_account_providers = Arc::new(HashSet::from(["P".into()]));
+    for account in [None, Some("other")] {
+        let mut detail = ExecutionDetail::loading();
+        detail.attempts.push(Attempt {
+            provider: Some("P".into()),
+            provider_account: account.map(str::to_string),
+            model: "m".into(),
+            status_code: Some(200),
+            ..Default::default()
+        });
+        let doc = Doc::with_detail(&raw, &detail, &Config::default());
+        assert_eq!(doc.rows.len(), 2);
+        assert_eq!(doc.rows[1].provider, "P(selected)");
+    }
+}
+
+#[test]
 fn repeated_attempts_are_not_deduplicated() {
     let raw = row(r#"{"status":502,"err":"same error","model":"m","tries":2}"#);
     let mut detail = ExecutionDetail::loading();
@@ -124,7 +344,7 @@ fn missing_status_is_not_fabricated_and_missing_reason_is_explicit() {
     );
     assert_eq!(typed.rows[0].kind, "rate_limit_error");
     assert_eq!(typed.rows[0].log, "slow down");
-    let unknown = Entry::from_attempt(&Attempt::default(), &config);
+    let unknown = Entry::from_attempt(&Attempt::default(), &config, &HashSet::new());
     assert_eq!(unknown.code, fmt::BLANK);
     assert_eq!(unknown.log, fmt::BLANK);
     assert_eq!(unknown.color, theme::TEXT_DIM);

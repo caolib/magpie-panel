@@ -170,6 +170,46 @@ fn hidden_and_dynamic_columns_reappear_at_their_saved_positions() {
 }
 
 #[test]
+fn provider_cell_distinguishes_accounts_and_keeps_key_only_labels() {
+    let column = Column::Field(DisplayField::Provider);
+    let multi_account_providers =
+        std::sync::Arc::new(std::collections::HashSet::from(["Provider".to_string()]));
+    for (json, expected) in [
+        (
+            r#"{"providerName":"Provider","providerAccount":"first"}"#,
+            "Provider(first)",
+        ),
+        (
+            r#"{"providerName":"Provider","providerAccount":"second"}"#,
+            "Provider(second)",
+        ),
+        (
+            r#"{"providerName":"Provider","providerKeyName":"key"}"#,
+            "Provider(key)",
+        ),
+        (
+            r#"{"providerName":"Other","providerAccount":"only"}"#,
+            "Other",
+        ),
+        (
+            r#"{"providerName":"Other","providerAccount":"only","providerKeyName":"key"}"#,
+            "Other(key)",
+        ),
+    ] {
+        let mut row = row(json);
+        row.multi_account_providers = std::sync::Arc::clone(&multi_account_providers);
+        assert_eq!(column.text(&row, 0), expected);
+    }
+    assert_eq!(
+        column.text(
+            &row(r#"{"providerName":"Provider","providerAccount":"only"}"#),
+            0
+        ),
+        "Provider"
+    );
+}
+
+#[test]
 fn the_model_cell_prefers_the_served_model_with_its_effort() {
     let rows = [row(FULL)];
     let column = Column::Field(DisplayField::Model);
@@ -378,6 +418,49 @@ fn a_latency_cell_without_a_first_token_judges_the_running_total() {
     assert_eq!(color(&live), theme::RED);
     assert_eq!(color(&long_generation), theme::TEXT_DIM);
     assert_eq!(color(&immediate), theme::TEXT_DIM);
+}
+
+#[test]
+fn supplier_width_is_capped_at_each_density_without_capping_other_columns() {
+    let mut long = row(r#"{"provider":"p","providerAccount":"account","model":"m"}"#);
+    long.multi_account_providers =
+        std::sync::Arc::new(std::collections::HashSet::from(["p".into()]));
+    long.provider_account = Some("长账号".repeat(100));
+    long.model = "x".repeat(100);
+    let rows = [long];
+    let columns = [
+        Column::Field(DisplayField::Provider),
+        Column::Field(DisplayField::Model),
+    ];
+    for scale in [1.0, 1.5, 2.0] {
+        let measure = |s: &str| s.chars().count() as f32 * 8.0 * scale;
+        let widths = column_widths(&rows, &columns, 0, scale, measure);
+        assert_eq!(widths[0], PROVIDER_MAX_WIDTH * scale);
+        assert!(widths[1] > PROVIDER_MAX_WIDTH * scale);
+        let full = columns[0].text(&rows[0], 0);
+        let shown = ellipsize(&full, widths[0] - CELL_HPAD * scale * 2.0, measure);
+        assert!(shown.ends_with("…)"));
+        assert!(measure(&shown) <= widths[0] - CELL_HPAD * scale * 2.0);
+        assert_eq!(
+            rows[0].provider_account.as_ref().unwrap().chars().count(),
+            300
+        );
+    }
+}
+
+#[test]
+fn supplier_ellipsis_preserves_short_text_and_never_splits_unicode() {
+    let measure = |s: &str| {
+        s.chars()
+            .map(|c| if c.is_ascii() { 1.0 } else { 2.0 })
+            .sum::<f32>()
+    };
+    assert_eq!(ellipsize("P(account)", 20.0, measure), "P(account)");
+    assert_eq!(ellipsize("P(中文账号🙂)", 9.0, measure), "P(中文…)");
+    assert_eq!(ellipsize("long-provider", 6.0, measure), "long…");
+    assert_eq!(ellipsize("long-provider", 1.0, measure), "");
+    assert_eq!(ellipsize("P(account)", 2.0, measure), "…");
+    assert_eq!(ellipsize("", 0.0, measure), "");
 }
 
 #[test]
