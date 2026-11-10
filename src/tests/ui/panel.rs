@@ -53,6 +53,30 @@ fn each_connection_gets_a_stable_tag_colour() {
 }
 
 #[test]
+fn the_header_gives_the_status_text_its_width_first() {
+    // No status: the caller name gets the whole gap.
+    assert_eq!(header_slots(100.0, 0.0, 8.0), (100.0, 0.0));
+    // A status keeps what it needs; the name takes the rest.
+    assert_eq!(header_slots(100.0, 40.0, 8.0), (52.0, 40.0));
+    // Too narrow for both: the name disappears before the status clips.
+    assert_eq!(header_slots(100.0, 95.0, 8.0), (0.0, 95.0));
+    assert_eq!(header_slots(100.0, 120.0, 8.0), (0.0, 100.0));
+    assert_eq!(header_slots(0.0, 10.0, 8.0), (0.0, 0.0));
+}
+
+#[test]
+fn one_trimmed_caller_rides_in_the_header() {
+    let rows = [
+        row(r#"{"model":"a","agentName":" Claude Code "}"#, "a1"),
+        row(r#"{"model":"b","agentName":"Claude Code"}"#, "a1"),
+    ];
+    assert_eq!(view(&rows, &[]).single_agent(), Some("Claude Code"));
+    // Nothing on screen, nothing to announce.
+    let empty: &[Row] = &[];
+    assert_eq!(view(empty, &[]).single_agent(), None);
+}
+
+#[test]
 fn the_header_has_one_chip_per_filter() {
     let m = Metrics::new(800.0, 300.0, 1.0);
     let rows: &[Row] = &[];

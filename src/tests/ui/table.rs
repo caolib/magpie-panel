@@ -89,6 +89,43 @@ fn the_error_column_steps_aside_for_the_cache_column() {
 }
 
 #[test]
+fn the_agent_column_steps_aside_for_one_caller() {
+    let same = [
+        row(r#"{"model":"a","agentName":"Claude Code"}"#),
+        row(r#"{"model":"b","agent":"Claude Code"}"#),
+    ];
+    assert!(!fields(&same, &[]).contains(&DisplayField::Agent));
+    assert_eq!(view(&same, &[]).single_agent(), Some("Claude Code"));
+
+    // A second caller brings the column back.
+    let mixed = [
+        row(r#"{"model":"a","agentName":"Claude Code"}"#),
+        row(r#"{"model":"b","agent":"Codex"}"#),
+    ];
+    assert!(fields(&mixed, &[]).contains(&DisplayField::Agent));
+    assert_eq!(view(&mixed, &[]).single_agent(), None);
+
+    // One row without a caller is not proof of "only this caller".
+    let partial = [
+        row(r#"{"model":"a","agentName":"Claude Code"}"#),
+        row(r#"{"model":"b"}"#),
+    ];
+    assert!(fields(&partial, &[]).contains(&DisplayField::Agent));
+    assert_eq!(view(&partial, &[]).single_agent(), None);
+
+    // A single row counts: every row names the same caller.
+    let single = [row(r#"{"model":"a","agentName":"Claude Code"}"#)];
+    assert!(!fields(&single, &[]).contains(&DisplayField::Agent));
+    assert_eq!(view(&single, &[]).single_agent(), Some("Claude Code"));
+
+    // The settings window has the final say.
+    let hidden = [DisplayField::Agent];
+    assert!(!fields(&same, &hidden).contains(&DisplayField::Agent));
+    assert_eq!(view(&same, &hidden).single_agent(), None);
+    assert_eq!(view(&[], &[]).single_agent(), None);
+}
+
+#[test]
 fn switching_a_column_off_removes_it() {
     let rows = [row(FULL)];
     let shown = fields(&rows, &[DisplayField::Speed, DisplayField::Cost]);

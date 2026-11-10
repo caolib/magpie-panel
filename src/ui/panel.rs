@@ -33,6 +33,9 @@ const SETTINGS_H: f32 = 20.0;
 /// Header query box, sitting just left of the settings button.
 const QUERY_BOX_W: f32 = 150.0;
 const QUERY_BOX_H: f32 = 20.0;
+/// Gap between the caller name and the status text in the header.
+const NAME_GAP: f32 = 8.0;
+
 /// Chip order on the header, left to right.
 const FILTERS: [Filter; 5] = [
     Filter::All,
@@ -175,6 +178,30 @@ impl ListView<'_> {
     pub fn shows(&self, field: DisplayField) -> bool {
         !self.hidden_fields.contains(&field)
     }
+
+    /// The caller every displayed row names, when the agent column can step
+    /// aside and the header can carry the name instead. One row without a
+    /// caller (a live request, an old record) keeps the column: a partly empty
+    /// list must not read as "only this caller".
+    pub fn single_agent(&self) -> Option<&str> {
+        if !self.shows(DisplayField::Agent) {
+            return None;
+        }
+        let mut found: Option<&str> = None;
+        for row in self.rows {
+            let agent = row
+                .agent
+                .as_deref()
+                .map(str::trim)
+                .filter(|agent| !agent.is_empty())?;
+            match found {
+                Some(name) if name != agent => return None,
+                Some(_) => {}
+                None => found = Some(agent),
+            }
+        }
+        found
+    }
 }
 
 /// Draw one frame. Returns the client width the table wants when that differs
@@ -185,6 +212,18 @@ pub fn draw(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) -> Opti
     let wanted = table::draw(p, fonts, m, v).map(|w| w.max(header_min_width(m)));
     draw_edge(p, m);
     wanted
+}
+
+/// Split the header's free width between the caller name and the status text.
+/// The status keeps the width it needs; the name takes what is left of it and
+/// is ellipsized past that. Returns `(name_w, status_w)`.
+fn header_slots(total: f32, status_w: f32, gap: f32) -> (f32, f32) {
+    let total = total.max(0.0);
+    if status_w <= 0.0 {
+        return (total, 0.0);
+    }
+    let status = status_w.min(total);
+    ((total - status - gap).max(0.0), status)
 }
 
 /// Width the header's controls need so nothing overlaps.
@@ -384,22 +423,47 @@ fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
     }
 
     let sub_right = box_.x - 8.0 * s;
-    let sub_w = (sub_right - x).max(0.0);
+    let free = (sub_right - x).max(0.0);
     let (text, color) = match &v.status_text {
         Some((message, true)) => (message.clone(), theme::RED),
         Some((message, false)) => (message.clone(), theme::GREEN),
         None => (String::new(), theme::TEXT_FAINT),
     };
-    p.dual_text(
-        &fonts.small,
-        &text,
-        x,
-        y,
-        sub_w,
-        18.0 * s,
-        color,
-        theme::ALIGN_NEAR,
-    );
+    let status_w = if text.is_empty() {
+        0.0
+    } else {
+        p.dual_measure(&fonts.small, &text)
+    };
+    let (name_w, status_w) = header_slots(free, status_w, NAME_GAP * s);
+    let mut next = x;
+    if name_w > 0.0
+        && let Some(agent) = v.single_agent()
+    {
+        let shown = table::ellipsize(agent, name_w, |text| p.dual_measure(&fonts.small, text));
+        p.dual_text(
+            &fonts.small,
+            &shown,
+            x,
+            y,
+            name_w,
+            18.0 * s,
+            theme::TEXT_FAINT,
+            theme::ALIGN_NEAR,
+        );
+        next = x + name_w + NAME_GAP * s;
+    }
+    if status_w > 0.0 {
+        p.dual_text(
+            &fonts.small,
+            &text,
+            next,
+            y,
+            status_w,
+            18.0 * s,
+            color,
+            theme::ALIGN_NEAR,
+        );
+    }
 
     p.fill_rect(0.0, m.header_h - 1.0, m.width, 1.0, theme::SEPARATOR);
 }

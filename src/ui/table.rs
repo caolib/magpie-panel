@@ -48,6 +48,9 @@ impl Column {
                 continue;
             }
             let keep = match field {
+                // One caller for every row: the header carries the name
+                // instead, and the column stops taking width.
+                DisplayField::Agent => v.single_agent().is_none(),
                 DisplayField::Retry => v.rows.iter().any(has_retry),
                 // The cache cell already carries the status code of a failed
                 // request, so the error column only earns its width when the
@@ -239,7 +242,7 @@ fn error_code(row: &Row) -> Option<String> {
 
 /// Ellipsize only at UTF-8 character boundaries. Measure the entire candidate
 /// because mixed Latin/CJK font runs have their own overhang allowances.
-fn ellipsize(text: &str, max_width: f32, measure: impl Fn(&str) -> f32) -> String {
+pub(crate) fn ellipsize(text: &str, max_width: f32, measure: impl Fn(&str) -> f32) -> String {
     if measure(text) <= max_width {
         return text.into();
     }
