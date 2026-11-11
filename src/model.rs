@@ -887,27 +887,17 @@ impl Row {
         }
     }
 
-    /// Display identity shared by grouping and name colours; routing brackets do not count.
+    /// Display identity shared by grouping and name colours.
     pub fn model_key(&self) -> (&str, Option<&str>) {
         (self.served_model(), self.reasoning_effort.as_deref())
     }
 
-    /// Whether the request was served by a model other than the one asked for.
-    pub fn is_routed(&self) -> bool {
-        !self.requested_model.is_empty()
-            && !self.model.is_empty()
-            && self.requested_model != self.model
-    }
-
-    /// The served model with its effort, e.g. `gpt-5.2(high)`. A routed model
-    /// is wrapped in brackets so the distinction is unambiguous.
+    /// The served model with its effort, e.g. `gpt-5.2(high)`.
     pub fn display_model(&self) -> String {
         let model = self.served_model();
-        match (&self.reasoning_effort, self.is_routed()) {
-            (Some(effort), true) => format!("[{}({})]", model, effort),
-            (Some(effort), false) => format!("{}({})", model, effort),
-            (None, true) => format!("[{}]", model),
-            (None, false) => model.to_string(),
+        match &self.reasoning_effort {
+            Some(effort) => format!("{}({})", model, effort),
+            None => model.to_string(),
         }
     }
 

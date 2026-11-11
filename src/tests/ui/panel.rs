@@ -254,7 +254,7 @@ fn every_name_theme_uses_its_palette_in_bottom_up_order() {
 }
 
 #[test]
-fn model_colours_distinguish_efforts_but_not_routing_brackets() {
+fn model_colours_distinguish_efforts_only() {
     let rows = vec![
         row(r#"{"model":"A","effort":"high"}"#, "a1"),
         row(r#"{"req":"group","model":"A","effort":"low"}"#, "a2"),
@@ -269,7 +269,7 @@ fn model_colours_distinguish_efforts_but_not_routing_brackets() {
             (("A", Some("high")), NAME_PALETTE[2]),
         ]
     );
-    assert_ne!(rows[1].display_model(), rows[2].display_model());
+    assert_eq!(rows[1].display_model(), rows[2].display_model());
     assert_eq!(model_color_key(&rows[1]), model_color_key(&rows[2]));
 }
 

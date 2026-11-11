@@ -352,7 +352,7 @@ fn grouping_never_moves_or_groups_live_rows_with_either_live_first_setting() {
 }
 
 #[test]
-fn grouping_uses_display_model_and_effort_across_providers_connections_and_routing() {
+fn grouping_uses_display_model_and_effort_across_providers_and_connections() {
     let mut app = app_with(vec![
         row(
             r#"{"t":"2026-10-20T09:00:05Z","model":"long-A","effort":"high","provider":"p1"}"#,
@@ -385,7 +385,7 @@ fn grouping_uses_display_model_and_effort_across_providers_connections_and_routi
             .collect::<Vec<_>>(),
         [Some("high"), Some("high"), Some("low"), Some("low"), None]
     );
-    assert_ne!(app.rows[0].display_model(), app.rows[1].display_model());
+    assert_eq!(app.rows[0].display_model(), app.rows[1].display_model());
     assert_eq!(app.rows[0].model_key(), app.rows[1].model_key());
     assert_ne!(app.rows[0].account_id, app.rows[1].account_id);
     assert_ne!(app.rows[0].provider, app.rows[1].provider);

@@ -317,13 +317,12 @@ fn active_requests_preserve_effort_and_tolerate_older_feeds() {
 }
 
 #[test]
-fn routed_models_are_bracketed_and_carry_their_effort() {
+fn routed_models_show_only_the_served_name_and_effort() {
     let row = Row::from_record(&record(FULL));
-    assert!(row.is_routed());
-    assert_eq!(row.display_model(), "[claude-sonnet-4(high)]");
+    assert_ne!(row.requested_model, row.model);
+    assert_eq!(row.display_model(), "claude-sonnet-4(high)");
 
     let plain = Row::from_record(&record(r#"{"req":"gpt-5","model":"gpt-5"}"#));
-    assert!(!plain.is_routed());
     assert_eq!(plain.display_model(), "gpt-5");
 }
 

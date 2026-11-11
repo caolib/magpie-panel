@@ -258,7 +258,7 @@ fn provider_cell_distinguishes_accounts_and_keeps_key_only_labels() {
 fn the_model_cell_prefers_the_served_model_with_its_effort() {
     let rows = [row(FULL)];
     let column = Column::Field(DisplayField::Model);
-    assert_eq!(column.text(&rows[0], 0), "[claude-sonnet-4]");
+    assert_eq!(column.text(&rows[0], 0), "claude-sonnet-4");
 }
 
 #[test]
