@@ -692,14 +692,24 @@ impl Row {
             .filter(|provider| !provider.trim().is_empty())
     }
 
-    /// Only multi-account suppliers show accounts; API-key labels stay visible.
+    /// Only multi-account suppliers show accounts, limited to six characters
+    /// without an ellipsis. Raw names and API-key labels stay unchanged.
     pub fn provider_label(&self) -> Option<String> {
         let show_account = self
             .provider_identity()
             .is_some_and(|provider| self.multi_account_providers.contains(provider));
+        let account = self
+            .provider_account
+            .as_deref()
+            .filter(|_| show_account)
+            .map(str::trim)
+            .map(|account| match account.char_indices().nth(6) {
+                Some((end, _)) => &account[..end],
+                None => account,
+            });
         provider_label(
             self.provider.as_deref(),
-            self.provider_account.as_deref().filter(|_| show_account),
+            account,
             self.provider_key.as_deref(),
         )
     }

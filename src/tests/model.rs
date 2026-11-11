@@ -93,11 +93,7 @@ fn the_provider_cell_carries_the_key_name_in_parentheses() {
 fn multi_account_provider_shows_account_before_the_key_without_changing_identity() {
     for (account, key, expected) in [
         (Some("team"), None, "Provider(team)"),
-        (
-            Some("user@example.com"),
-            Some("key"),
-            "Provider(user@example.com)",
-        ),
+        (Some("user@example.com"), Some("key"), "Provider(user@e)"),
         (Some("  team  "), None, "Provider(team)"),
         (Some("  "), Some("key"), "Provider(key)"),
         (None, Some("key"), "Provider(key)"),
@@ -165,7 +161,7 @@ fn account_visibility_uses_each_raw_supplier_identity_before_aliasing() {
         ),
         (
             r#"{"providerName":"Provider","providerAccount":"fallback"}"#,
-            "P(fallback)",
+            "P(fallba)",
         ),
     ] {
         let mut raw = Row::from_record(&record(json));
@@ -187,6 +183,40 @@ fn account_visibility_uses_each_raw_supplier_identity_before_aliasing() {
 }
 
 #[test]
+fn displayed_accounts_keep_six_unicode_characters_without_changing_detail_names() {
+    for (account, expected) in [
+        ("", "Provider(key-label)"),
+        ("   ", "Provider(key-label)"),
+        ("abcde", "Provider(abcde)"),
+        ("abcdef", "Provider(abcdef)"),
+        ("abcdefg", "Provider(abcdef)"),
+        ("  abcdefg  ", "Provider(abcdef)"),
+        ("中文账号名称", "Provider(中文账号名称)"),
+        ("中文账号名称七", "Provider(中文账号名称)"),
+        ("甲🙂乙🙂丙🙂丁", "Provider(甲🙂乙🙂丙🙂)"),
+        ("ab(cd)ef", "Provider(ab(cd))"),
+    ] {
+        let mut row = Row::from_record(&record(
+            r#"{"providerName":"Provider","providerKeyName":"key-label"}"#,
+        ));
+        row.provider_account = Some(account.into());
+        row.multi_account_providers = Arc::new(HashSet::from(["Provider".into()]));
+        let identity = row.detail_identity();
+        assert_eq!(row.provider_label().as_deref(), Some(expected));
+        assert_eq!(row.provider_account.as_deref(), Some(account));
+        assert_eq!(row.detail_identity(), identity);
+        assert_eq!(
+            provider_label(Some("Provider"), Some(account), Some("key-label")),
+            Some(if account.trim().is_empty() {
+                "Provider(key-label)".into()
+            } else {
+                format!("Provider({})", account.trim())
+            })
+        );
+    }
+}
+
+#[test]
 fn active_accounts_use_the_same_visibility_rule_as_history() {
     let active = ActiveRequest {
         trace_provider: Some("p".into()),
@@ -200,6 +230,9 @@ fn active_accounts_use_the_same_visibility_rule_as_history() {
     row.multi_account_providers = Arc::new(HashSet::from(["p".into()]));
     assert_eq!(row.provider_label().as_deref(), Some("Provider(team)"));
     assert_eq!(row.provider_account.as_deref(), Some("team"));
+    row.provider_account = Some("team-account".into());
+    assert_eq!(row.provider_label().as_deref(), Some("Provider(team-a)"));
+    assert_eq!(row.provider_account.as_deref(), Some("team-account"));
 }
 
 #[test]

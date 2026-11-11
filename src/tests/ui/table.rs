@@ -221,6 +221,14 @@ fn provider_cell_distinguishes_accounts_and_keeps_key_only_labels() {
             "Provider(second)",
         ),
         (
+            r#"{"providerName":"Provider","providerAccount":"long-account"}"#,
+            "Provider(long-a)",
+        ),
+        (
+            r#"{"providerName":"Provider","providerAccount":"中文账号名称七"}"#,
+            "Provider(中文账号名称)",
+        ),
+        (
             r#"{"providerName":"Provider","providerKeyName":"key"}"#,
             "Provider(key)",
         ),
@@ -463,6 +471,7 @@ fn supplier_width_is_capped_at_each_density_without_capping_other_columns() {
     long.multi_account_providers =
         std::sync::Arc::new(std::collections::HashSet::from(["p".into()]));
     long.provider_account = Some("长账号".repeat(100));
+    long.provider = Some("long-provider-".repeat(30));
     long.model = "x".repeat(100);
     let rows = [long];
     let columns = [
