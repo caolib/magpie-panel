@@ -102,6 +102,8 @@ fn trace_and_history_show_each_attempts_account_without_aliasing_it() {
         provider_aliases: vec![NameAlias {
             from: "Provider".into(),
             to: "P".into(),
+            logo: String::new(),
+            logo_bg: String::new(),
         }],
         ..Default::default()
     };
@@ -141,6 +143,8 @@ fn loading_details_preserve_connection_visibility_and_key_fallback() {
         provider_aliases: vec![NameAlias {
             from: "Provider".into(),
             to: "P".into(),
+            logo: String::new(),
+            logo_bg: String::new(),
         }],
         ..Default::default()
     };
@@ -215,6 +219,8 @@ fn trace_and_history_only_expand_suppliers_with_distinct_accounts() {
         provider_aliases: vec![NameAlias {
             from: "Provider".into(),
             to: "P".into(),
+            logo: String::new(),
+            logo_bg: String::new(),
         }],
         ..Default::default()
     };
@@ -358,6 +364,8 @@ fn copy_preserves_long_multiline_errors_and_mapping_is_applied_once() {
     let alias = NameAlias {
         from: "aa".into(),
         to: "a".into(),
+        logo: String::new(),
+        logo_bg: String::new(),
     };
     let config = Config {
         model_aliases: vec![alias.clone()],

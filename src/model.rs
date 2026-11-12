@@ -58,11 +58,12 @@ pub fn apply_aliases(raw: &str, aliases: &[crate::config::NameAlias]) -> String 
         return current;
     }
     for alias in aliases {
-        let from = alias.from.trim();
-        if from.is_empty() {
-            continue;
+        for from in alias.from.split([',', '，']).map(str::trim) {
+            if from.is_empty() {
+                continue;
+            }
+            current = replace_all_ci(&current, from, alias.to.trim());
         }
-        current = replace_all_ci(&current, from, alias.to.trim());
     }
     current
 }
@@ -608,6 +609,9 @@ pub struct Row {
     pub model: String,
     /// The model the reply declared (`served`), when present.
     pub served_model: Option<String>,
+    /// Icon the model cell wears, from the model mappings. Captured before
+    /// display aliases rewrite the name.
+    pub logo: Option<Arc<crate::config::ModelLogo>>,
     /// The provider's display name, falling back to its id.
     pub provider: Option<String>,
     /// The raw provider id, used for filtering.
@@ -669,6 +673,8 @@ impl Row {
     /// never applied twice, and updates can reapply the current configuration.
     pub fn for_display(&self, config: &crate::config::Config) -> Self {
         let mut row = self.clone();
+        // Resolved against the raw name, before any mapping rewrites it.
+        row.logo = config.model_logo(&row.model);
         if !config.model_aliases.is_empty() {
             row.requested_model = display_model_name(&row.requested_model, &config.model_aliases);
             row.model = display_model_name(&row.model, &config.model_aliases);
@@ -750,6 +756,7 @@ impl Row {
             requested_model: requested,
             model,
             served_model: non_empty(record.served.as_deref()),
+            logo: None,
             provider: non_empty(record.provider_name.as_deref())
                 .or_else(|| non_empty(record.provider.as_deref())),
             provider_id: non_empty(record.provider.as_deref()),
@@ -805,6 +812,7 @@ impl Row {
             error: active.trace_error.clone(),
             error_type: non_empty(active.trace_fail.as_deref()),
             agent_id: non_empty(active.agent.as_deref()),
+            logo: None,
             requested_model: model.clone(),
             model,
             served_model: None,

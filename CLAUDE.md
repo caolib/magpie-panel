@@ -24,6 +24,8 @@ cargo fmt -- --check
 - 配置：`%APPDATA%\magpie-panel\config.json`，首次运行生成。
 - 网关密钥：`%APPDATA%\magpie-panel\credentials.bin`，DPAPI 加密并绑定当前用户。`accounts` 只存 id/名称/地址。
 - `MAGPIE_PANEL_HOME` 覆盖整个存储目录（`config::base_dir`）；`AH_PANEL_HOME` 仍兼容。新目录没有配置/密钥时沿用 `%APPDATA%\ah-panel`，不搬移、不覆盖。
+- 模型映射条目可选 `logo`（PNG/JPG 文件路径）与 `logoBg`（`#RRGGBB`/`#AARRGGBB`，留空为白色，`none`/`transparent`/`透明` 为透明）。图标按原始模型名匹配映射的 `from`，在显示名改写之前决定；图标完全由配置决定，没有内建默认图标。`ui/logo.rs` 缓存解码结果并按文件 mtime 重载。
+- 映射表单的 `from` 可用逗号分隔（`deepseek,ds`），仍保存为一条规则，匹配时按逗号拆开分别判断（`apply_aliases` 与 `model_logo` 都这样处理）；保存时规范化为 `a,b` 形式。「编辑」把一条回填到表单，保存替换原条目（改前缀时先删旧条目）。设置窗口的编辑框是原生 EDIT，外框由父窗口按圆角绘制，控件只占一行高度并垂直居中。
 - `accounts` 是实际轮询的连接；顶层 `endpoint` 是首次安装和新增连接表单的默认地址。环境变量 `MAGPIE_GATEWAY_KEY`（名字由 `gatewayKeyEnvVar` 改）只覆盖第一条连接，并优先于该连接保存的密钥。
 - `pollSeconds` / `activePollSeconds`（默认 5 / 2）只能改配置后重启，设置窗口没有。`period`（默认 `30d`）同样只改配置，决定 usage 窗口。
 - `rowLimit` 随窗口高度重算。
@@ -36,6 +38,7 @@ cargo fmt -- --check
 - 全部状态在 UI 线程的 `thread_local! RefCell<Option<State>>`（`app`、`worker`、`fonts`、`detail`、`settings`、`scale` 等），经 `State::with(|s| ...)` 修改。`State` 只属于 UI 线程。
 - 窗口过程不直接调用 `SetWindowPos` / `DestroyWindow` / 模态弹窗等会泵消息的 Win32 API：它们可能在持有 `RefCell` 借用时重入并触发 `RefCell already borrowed`。把意图压进 `Vec<Action>`，释放借用后由 `run_actions` 执行；Action 可继续压 Action。
 - `Action::Redraw` 只作用于发起它的 `hwnd`；`pump_worker` 在详情弹窗打开时要额外 `invalidate(popup_hwnd)`。detail / settings 是独立窗口，但共用同一个 `State`。
+- 详情弹窗失焦即关闭；设置窗口不随失焦关闭（Esc、「完成」或标题栏关闭），否则点面板其他位置会丢掉正在填写的表单。
 - 详情回包用 `DetailTicket` 的 nonce、`targets_revision`、endpoint 和原始行 `DetailIdentity` 一起校验；连接或凭据编辑会推进 revision，迟到回包必须丢弃。
 
 ## 绘制
@@ -43,6 +46,7 @@ cargo fmt -- --check
 - `WM_PAINT` 经 `with_double_buffer` 画到离屏位图后一次 `BitBlt`，避免闪烁。
 - 布局集中在 `ui/layout.rs`（纯函数、可测），按显示器物理像素密度缩放，而不是系统缩放；`config.window` 存 96 DPI 逻辑单位（`logicalWindow`）。`WM_DPICHANGED` 只处理系统 DPI 变化，跨屏密度变化由 `WM_MOVE` 侦测。
 - 中英文混排由 `theme.rs::split_runs` 按字形来源分段，分别用拉丁/CJK 字体测量和绘制。
+- 图标解码时缩到最长边 64px（`ICON_SOURCE_MAX`）再缓存。直接每帧把原图双三次缩到十几像素会让整表重绘慢到拖动卡顿。
 - 表格没有表头；第一列是状态圆点。列宽取当前页每列最长文本的实测宽度，空列自动隐藏，窗口宽度跟随列宽。
 - 详情弹窗最大宽度 1080 物理像素，日志超长时在弹窗内换行。
 

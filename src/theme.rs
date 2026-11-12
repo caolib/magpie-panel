@@ -10,6 +10,8 @@ use windows::Win32::Graphics::GdiPlus::*;
 pub use windows::Win32::Graphics::GdiPlus::{
     GpBrush, GpFont, GpFontFamily, GpGraphics, GpPath, GpPen, GpSolidFill, GpStringFormat, RectF,
 };
+use windows::Win32::System::Com::IStream;
+use windows::Win32::UI::Shell::SHCreateMemStream;
 use windows::core::PCWSTR;
 
 // --- palette (dark theme) ---
@@ -63,10 +65,20 @@ const TRIM_ELLIPSIS: StringTrimming = StringTrimming(3);
 /// keeps text centred in controls taller than one line — buttons, inputs, tabs.
 const LINE_ALIGN_CENTER: StringAlignment = StringAlignment(1);
 const NO_WRAP: i32 = 0x1000;
+/// Downscaling a 64 px source to a 12 px row mark needs a real filter, or the
+/// thin strokes turn into grey mush.
+const INTERP_HIGH_QUALITY_BICUBIC: InterpolationMode = InterpolationMode(7);
 
 pub const ALIGN_NEAR: u32 = 0;
 pub const ALIGN_CENTER: u32 = 1;
 pub const ALIGN_FAR: u32 = 2;
+
+/// A model icon: side and the gap after it, in 96-DPI logical pixels, plus the
+/// corner radius and inset of the background square drawn behind it.
+pub const ICON_SIZE: f32 = 12.0;
+pub const ICON_GAP: f32 = 4.0;
+pub const ICON_RADIUS: f32 = 3.0;
+pub const ICON_INSET: f32 = 1.5;
 
 /// The font sizes the panel uses. Sizes are in device pixels (the process is
 /// per-monitor DPI aware, so these scale with `ctx.scale`).
@@ -237,6 +249,101 @@ impl Drop for Fonts {
     }
 }
 
+/// A decoded image that outlives a single paint, drawn at whatever size a row
+/// can spare. Like [`Fonts`], a GDI+ object owned by the UI thread only.
+/// Longest side an icon is kept at: enough for a 12pt mark on a 4x display,
+/// small enough that per-frame bicubic scaling stays cheap.
+const ICON_SOURCE_MAX: f32 = 64.0;
+
+pub struct Image {
+    image: *mut GpImage,
+    /// Intrinsic size in pixels, used to fit the picture without stretching.
+    width: f32,
+    height: f32,
+    /// GDI+ may keep reading from the stream behind the bitmap, so it is held
+    /// for as long as the image lives.
+    _stream: IStream,
+    _ui_thread: PhantomData<std::rc::Rc<()>>,
+}
+
+impl Image {
+    /// Decode a raster image (PNG, JPEG, …) held in memory. Returns `None`
+    /// when GDI+ cannot read it; callers treat that as "draw without the mark"
+    /// rather than failing the frame.
+    pub fn load_png(bytes: &[u8]) -> Option<Self> {
+        unsafe {
+            let stream = SHCreateMemStream(Some(bytes))?;
+            let mut bitmap: *mut GpBitmap = std::ptr::null_mut();
+            if GdipCreateBitmapFromStream(&stream, &mut bitmap).0 != 0 || bitmap.is_null() {
+                return None;
+            }
+            let image = bitmap as *mut GpImage;
+            let (mut image, mut width, mut height) =
+                (image, dimension(image, true), dimension(image, false));
+            // Icons are drawn at a dozen pixels. Resampling a full-size photo
+            // on every row of every frame is what makes the table crawl while
+            // it is being dragged, so shrink it once, here.
+            let longest = width.max(height);
+            if longest > ICON_SOURCE_MAX {
+                let scale = ICON_SOURCE_MAX / longest;
+                let thumb_w = (width * scale).round().max(1.0) as u32;
+                let thumb_h = (height * scale).round().max(1.0) as u32;
+                let mut thumb: *mut GpImage = std::ptr::null_mut();
+                if GdipGetImageThumbnail(
+                    image,
+                    thumb_w,
+                    thumb_h,
+                    &mut thumb,
+                    0,
+                    std::ptr::null_mut(),
+                )
+                .0 == 0
+                    && !thumb.is_null()
+                {
+                    let _ = GdipDisposeImage(image);
+                    image = thumb;
+                    width = dimension(image, true);
+                    height = dimension(image, false);
+                }
+            }
+            Some(Self {
+                image,
+                width,
+                height,
+                _stream: stream,
+                _ui_thread: PhantomData,
+            })
+        }
+    }
+}
+
+/// Width or height of a GDI+ image in pixels.
+fn dimension(image: *mut GpImage, width: bool) -> f32 {
+    unsafe {
+        let mut value = 0u32;
+        let status = if width {
+            GdipGetImageWidth(image, &mut value)
+        } else {
+            GdipGetImageHeight(image, &mut value)
+        };
+        if status.0 == 0 && value > 0 {
+            value as f32
+        } else {
+            0.0
+        }
+    }
+}
+
+impl Drop for Image {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.image.is_null() {
+                let _ = GdipDisposeImage(self.image);
+            }
+        }
+    }
+}
+
 /// A GDI+ drawing session bound to one `WM_PAINT`.
 pub struct Painter {
     g: *mut GpGraphics,
@@ -252,6 +359,7 @@ impl Painter {
             GdipSetSmoothingMode(g, SMOOTH_ANTIALIAS);
             GdipSetTextRenderingHint(g, TEXT_CLEARTYPE);
             GdipSetPixelOffsetMode(g, OFFSET_HALF);
+            GdipSetInterpolationMode(g, INTERP_HIGH_QUALITY_BICUBIC);
         }
         Some(Painter { g })
     }
@@ -281,6 +389,36 @@ impl Painter {
             GdipFillRectangle(self.g, brush as *mut GpBrush, x, y, w, h);
             GdipDeleteBrush(brush as *mut GpBrush);
         }
+    }
+
+    /// Stamp `image` into the rectangle `x, y, w, h`, preserving its alpha.
+    pub fn draw_image(&self, image: &Image, x: f32, y: f32, w: f32, h: f32) {
+        if image.image.is_null() || w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        unsafe {
+            let _ = GdipDrawImageRect(self.g, image.image, x, y, w, h);
+        }
+    }
+
+    /// Draw `image` inside the box without distorting it: scale by the tighter
+    /// axis and centre the result, so a wide brand mark keeps its shape.
+    pub fn draw_image_fit(&self, image: &Image, x: f32, y: f32, w: f32, h: f32) {
+        if image.width <= 0.0 || image.height <= 0.0 || w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        // Snap to whole pixels: GDI+ samples a fractional rectangle with an
+        // offset that reads as the picture sitting low and to the right.
+        let scale = (w / image.width).min(h / image.height);
+        let sw = (image.width * scale).round().min(w.round());
+        let sh = (image.height * scale).round().min(h.round());
+        self.draw_image(
+            image,
+            (x + (w - sw) / 2.0).round(),
+            (y + (h - sh) / 2.0).round(),
+            sw,
+            sh,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]

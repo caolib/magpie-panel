@@ -215,6 +215,7 @@ const MENU_ROWS_5: usize = 1400;
 const MENU_ROWS_10: usize = 1401;
 const MENU_ROWS_15: usize = 1402;
 const MENU_ROWS_20: usize = 1403;
+const MENU_ROWS_30: usize = 1404;
 const MENU_QUIT: usize = 1300;
 /// Font-size submenu items: `MENU_FONT_BASE` = 10 px, `MENU_FONT_BASE + 14` =
 /// 24 px. The menu lists common integer steps; the settings field accepts
@@ -249,6 +250,8 @@ struct State {
     app: App,
     worker: Worker,
     fonts: Fonts,
+    /// Model icons decoded from the files the mappings point at.
+    logos: ui::logo::LogoCache,
     detail: Option<DetailPopup>,
     detail_nonce: u64,
     targets_revision: u64,
@@ -501,6 +504,11 @@ fn init_logging() {
 fn main() {
     unsafe {
         init_logging();
+        // A panic escaping a Win32 callback aborts the process; leave a trace
+        // in the log so the next launch has something to explain it.
+        std::panic::set_hook(Box::new(|info| {
+            tracing::error!("panic: {info}");
+        }));
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         // Dark Win32 menus: load SetPreferredAppMode from uxtheme.dll.
         let uxtheme: Vec<u16> = "uxtheme.dll"
@@ -583,6 +591,7 @@ fn main() {
             app,
             worker,
             fonts: Fonts::load(1.0, &config.font_family, &config.cjk_font_family),
+            logos: ui::logo::LogoCache::default(),
             detail: None,
             detail_nonce: 0,
             targets_revision: 0,
@@ -1791,39 +1800,45 @@ fn paint(hwnd: HWND) -> Option<i32> {
         // Draw the whole frame into an off-screen bitmap and present it with one
         // BitBlt. Painting the window DC directly lets each invalidate show a
         // partially drawn frame, which the user sees as flicker.
-        let desired = with_double_buffer(hdc, rc, |painter| {
-            State::with(|s| {
-                if s.app.is_login() {
-                    if let Some(form) = s.app.login.as_ref() {
-                        login::draw(&painter, &s.fonts, form, m);
+        let desired =
+            with_double_buffer(hdc, rc, |painter| {
+                State::with(|s| {
+                    if s.app.is_login() {
+                        if let Some(form) = s.app.login.as_ref() {
+                            login::draw(&painter, &s.fonts, form, m);
+                        }
+                        None
+                    } else {
+                        // Re-read any icon whose file changed since the last frame;
+                        // the cache checks one timestamp per distinct source.
+                        s.logos.refresh(s.app.rows.iter().filter_map(|row| {
+                            row.logo.as_deref().map(|logo| logo.source.as_str())
+                        }));
+                        let view = ListView {
+                            rows: &s.app.rows,
+                            now: now_unix(),
+                            scroll: s.app.scroll,
+                            hover: s.app.hover,
+                            selected: s.app.selected,
+                            status_text: s.app.status.clone(),
+                            accounts: &s.app.accounts,
+                            settings_alert: s.app.any_issue(),
+                            pinned: s.app.config.pin_position,
+                            filter: s.app.filter,
+                            hidden_fields: &s.app.config.hidden_fields,
+                            field_order: s.app.config.ordered_fields(),
+                            name_color_theme: s.app.config.name_color_theme,
+                            query: s.app.query.as_deref(),
+                            query_draft: &s.app.query_draft,
+                            query_editing: s.app.query_editing,
+                            query_caret: s.app.query_caret,
+                        };
+                        panel::draw(&painter, &s.fonts, m, &view, &s.logos)
                     }
-                    None
-                } else {
-                    let view = ListView {
-                        rows: &s.app.rows,
-                        now: now_unix(),
-                        scroll: s.app.scroll,
-                        hover: s.app.hover,
-                        selected: s.app.selected,
-                        status_text: s.app.status.clone(),
-                        accounts: &s.app.accounts,
-                        settings_alert: s.app.any_issue(),
-                        pinned: s.app.config.pin_position,
-                        filter: s.app.filter,
-                        hidden_fields: &s.app.config.hidden_fields,
-                        field_order: s.app.config.ordered_fields(),
-                        name_color_theme: s.app.config.name_color_theme,
-                        query: s.app.query.as_deref(),
-                        query_draft: &s.app.query_draft,
-                        query_editing: s.app.query_editing,
-                        query_caret: s.app.query_caret,
-                    };
-                    panel::draw(&painter, &s.fonts, m, &view)
-                }
+                })
+                .flatten()
             })
-            .flatten()
-        })
-        .flatten();
+            .flatten();
 
         let _ = EndPaint(hwnd, &ps);
 
@@ -2470,6 +2485,7 @@ fn on_command(wp: WPARAM, actions: &mut Vec<Action>) {
             MENU_ROWS_10 => actions.push(Action::ResizeToRows(10)),
             MENU_ROWS_15 => actions.push(Action::ResizeToRows(15)),
             MENU_ROWS_20 => actions.push(Action::ResizeToRows(20)),
+            MENU_ROWS_30 => actions.push(Action::ResizeToRows(30)),
             _ if (MENU_FONT_BASE..=MENU_FONT_MAX).contains(&id) => {
                 actions.push(Action::SetFontSize((10 + (id - MENU_FONT_BASE)) as f32));
             }
@@ -2504,6 +2520,7 @@ fn is_menu_command(id: usize) -> bool {
                 | MENU_ROWS_10
                 | MENU_ROWS_15
                 | MENU_ROWS_20
+                | MENU_ROWS_30
         )
         || (MENU_FONT_BASE..=MENU_FONT_MAX).contains(&id)
 }
@@ -2542,6 +2559,7 @@ fn show_menu(hwnd: HWND) {
                 ("10 条", MENU_ROWS_10, 10),
                 ("15 条", MENU_ROWS_15, 15),
                 ("20 条", MENU_ROWS_20, 20),
+                ("30 条", MENU_ROWS_30, 30),
             ];
             for &(text, mid, count) in items {
                 let mut wide = text

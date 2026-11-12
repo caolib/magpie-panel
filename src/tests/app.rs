@@ -375,6 +375,8 @@ fn grouping_uses_display_model_and_effort_across_providers_and_connections() {
     app.config.model_aliases.push(NameAlias {
         from: "long-".into(),
         to: "".into(),
+        logo: String::new(),
+        logo_bg: String::new(),
     });
     app.config.group_by_model = true;
     app.rebuild();
@@ -526,6 +528,8 @@ fn model_aliases_apply_to_every_model_field() {
     app.config.model_aliases = vec![NameAlias {
         from: "claude".into(),
         to: "c".into(),
+        logo: String::new(),
+        logo_bg: String::new(),
     }];
     app.rebuild();
     assert_eq!(app.rows[0].requested_model, "c-x");
@@ -542,10 +546,14 @@ fn provider_and_caller_aliases_only_rewrite_display_names() {
     app.config.provider_aliases = vec![NameAlias {
         from: "Anthropic".into(),
         to: "A社".into(),
+        logo: String::new(),
+        logo_bg: String::new(),
     }];
     app.config.agent_aliases = vec![NameAlias {
         from: "Claude Code".into(),
         to: "CC".into(),
+        logo: String::new(),
+        logo_bg: String::new(),
     }];
     app.rebuild();
     assert_eq!(app.rows[0].provider.as_deref(), Some("A社"));
@@ -664,6 +672,8 @@ fn live_provider_names_apply_aliases_once_and_reapply_after_edits() {
     app.config.provider_aliases = vec![NameAlias {
         from: "trae".into(),
         to: "trae alias".into(),
+        logo: String::new(),
+        logo_bg: String::new(),
     }];
     for _ in 0..2 {
         app.rebuild();

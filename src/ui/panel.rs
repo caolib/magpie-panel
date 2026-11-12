@@ -206,10 +206,16 @@ impl ListView<'_> {
 
 /// Draw one frame. Returns the client width the table wants when that differs
 /// from the one the window has, so the caller can resize.
-pub fn draw(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) -> Option<f32> {
+pub fn draw(
+    p: &Painter,
+    fonts: &theme::Fonts,
+    m: Metrics,
+    v: &ListView,
+    logos: &crate::ui::logo::LogoCache,
+) -> Option<f32> {
     p.fill_rect(0.0, 0.0, m.width, m.height, theme::BG);
     draw_header(p, fonts, m, v);
-    let wanted = table::draw(p, fonts, m, v).map(|w| w.max(header_min_width(m)));
+    let wanted = table::draw(p, fonts, m, v, logos).map(|w| w.max(header_min_width(m)));
     draw_edge(p, m);
     wanted
 }

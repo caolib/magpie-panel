@@ -30,7 +30,8 @@ const ROW_H: f32 = 17.0;
 const CELL_PAD: f32 = 4.0;
 const COLUMN_GAP: f32 = 8.0;
 const BUTTON_H: f32 = 22.0;
-const CLOSE_W: f32 = 22.0;
+/// A word, not a glyph: a bare × was a small target and read as decoration.
+const CLOSE_W: f32 = 52.0;
 const COPY_W: f32 = 52.0;
 /// Widest the popup is allowed to grow, in device pixels. Longer logs wrap
 /// instead of widening it; a narrow monitor's work area can only make it
@@ -48,7 +49,7 @@ impl Button {
     pub fn label(self) -> &'static str {
         match self {
             Button::Copy => "复制",
-            Button::Close => "×",
+            Button::Close => "关闭",
         }
     }
 }
@@ -100,9 +101,9 @@ pub fn button_rect(m: &Popup, button: Button) -> Rect {
     match button {
         Button::Close => Rect {
             x: m.width - m.pad() - CLOSE_W * s,
-            y: (m.header_h() - CLOSE_W * s) / 2.0,
+            y: (m.header_h() - BUTTON_H * s) / 2.0,
             w: CLOSE_W * s,
-            h: CLOSE_W * s,
+            h: BUTTON_H * s,
         },
         Button::Copy => Rect {
             x: m.width - m.pad() - COPY_W * s,
@@ -633,21 +634,20 @@ pub fn draw(p: &Painter, fonts: &Fonts, m: &Popup, v: &View) -> Frame {
     for button in [Button::Close, Button::Copy] {
         let rect = button_rect(m, button);
         let hovered = v.hover == Some(button);
-        if button == Button::Copy || hovered {
-            p.round_rect(
-                rect.x,
-                rect.y,
-                rect.w,
-                rect.h,
-                4.0 * m.scale,
-                if hovered {
-                    theme::CARD_HOVER
-                } else {
-                    theme::CARD
-                },
-                true,
-            );
-        }
+        // Both are buttons now, so both keep a visible surface.
+        p.round_rect(
+            rect.x,
+            rect.y,
+            rect.w,
+            rect.h,
+            4.0 * m.scale,
+            if hovered {
+                theme::CARD_HOVER
+            } else {
+                theme::CARD
+            },
+            true,
+        );
         let label = button.label();
         let w = p.dual_measure(&fonts.small, label);
         p.dual_text(

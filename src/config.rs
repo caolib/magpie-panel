@@ -6,6 +6,7 @@
 //! the disk.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -207,6 +208,71 @@ pub struct HiddenProvider {
 pub struct NameAlias {
     pub from: String,
     pub to: String,
+    /// Icon file (PNG/JPEG) a matching model row wears. Only model mappings
+    /// use it; the other kinds ignore it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub logo: String,
+    /// Fill behind the icon, `#RRGGBB` (or `#AARRGGBB`). Empty means white;
+    /// `none`, `transparent` or `透明` leaves the icon on its own.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub logo_bg: String,
+}
+
+/// Case-insensitive substring test, matching how aliases replace names.
+fn contains_ci(haystack: &str, needle: &str) -> bool {
+    let needle = needle.as_bytes();
+    !needle.is_empty()
+        && haystack
+            .as_bytes()
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
+/// Colour behind a model icon. Empty input means white, the default the
+/// settings form offers; `none`, `transparent` or `透明` means no fill.
+pub fn parse_logo_bg(text: &str) -> Option<u32> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Some(0xFFFF_FFFF);
+    }
+    if text.eq_ignore_ascii_case("none")
+        || text.eq_ignore_ascii_case("transparent")
+        || text == "透明"
+    {
+        return None;
+    }
+    // A colour that does not parse still leaves the icon on a readable white
+    // square instead of vanishing against the dark panel.
+    parse_hex_color(text).or(Some(0xFFFF_FFFF))
+}
+
+/// `#RGB`, `#RRGGBB` or `#AARRGGBB` as ARGB. The leading `#` is optional.
+fn parse_hex_color(text: &str) -> Option<u32> {
+    let hex = text.trim().strip_prefix('#').unwrap_or(text.trim());
+    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    match hex.len() {
+        3 => {
+            let mut rgb = [0u32; 3];
+            for (slot, byte) in rgb.iter_mut().zip(hex.bytes()) {
+                *slot = (byte as char).to_digit(16)? * 0x11;
+            }
+            Some(0xFF00_0000 | (rgb[0] << 16) | (rgb[1] << 8) | rgb[2])
+        }
+        6 => Some(0xFF00_0000 | u32::from_str_radix(hex, 16).ok()?),
+        8 => u32::from_str_radix(hex, 16).ok(),
+        _ => None,
+    }
+}
+
+/// The icon a model mapping attaches to the rows it matches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelLogo {
+    /// Path to an image file.
+    pub source: String,
+    /// ARGB fill behind the icon; `None` draws the image alone.
+    pub bg: Option<u32>,
 }
 
 /// Which display name an alias list rewrites.
@@ -582,6 +648,26 @@ impl Config {
         }
     }
 
+    /// The prefixes one mapping names: comma separated, blanks dropped. The
+    /// rule itself stays a single entry; only matching looks at the parts.
+    fn alias_tokens(from: &str) -> impl Iterator<Item = &str> {
+        from.split([',', '，'])
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+    }
+
+    /// Store a prefix list the same way it is matched: trimmed, comma joined,
+    /// duplicates dropped (ignoring case).
+    fn normalize_alias_from(from: &str) -> String {
+        let mut kept: Vec<&str> = Vec::new();
+        for token in Self::alias_tokens(from) {
+            if !kept.iter().any(|other| other.eq_ignore_ascii_case(token)) {
+                kept.push(token);
+            }
+        }
+        kept.join(",")
+    }
+
     /// The alias list one kind rewrites.
     pub fn aliases(&self, kind: AliasKind) -> &[NameAlias] {
         match kind {
@@ -600,17 +686,76 @@ impl Config {
     }
 
     /// Add an abbreviation, or update the short form of an existing `from`
-    /// (compared case-insensitively) within one kind.
+    /// (compared case-insensitively) within one kind. A comma-separated `from`
+    /// stays one rule that matches any of its prefixes.
     pub fn upsert_alias(&mut self, kind: AliasKind, from: &str, to: &str) {
+        let from = Self::normalize_alias_from(from);
+        if from.is_empty() {
+            return;
+        }
         let key = from.to_lowercase();
         let aliases = self.aliases_mut(kind);
         match aliases.iter_mut().find(|a| a.from.to_lowercase() == key) {
             Some(slot) => slot.to = to.to_string(),
             None => aliases.push(NameAlias {
-                from: from.to_string(),
+                from,
                 to: to.to_string(),
+                ..NameAlias::default()
             }),
         }
+    }
+
+    /// Add or update a model mapping together with the icon it wears. An empty
+    /// `logo` clears the icon; there is no built-in mark.
+    pub fn upsert_model_alias(&mut self, from: &str, to: &str, logo: &str, logo_bg: &str) {
+        let from = Self::normalize_alias_from(from);
+        if from.is_empty() {
+            return;
+        }
+        let key = from.to_lowercase();
+        match self
+            .model_aliases
+            .iter_mut()
+            .find(|a| a.from.to_lowercase() == key)
+        {
+            Some(slot) => {
+                slot.to = to.to_string();
+                slot.logo = logo.to_string();
+                slot.logo_bg = logo_bg.to_string();
+            }
+            None => self.model_aliases.push(NameAlias {
+                from,
+                to: to.to_string(),
+                logo: logo.to_string(),
+                logo_bg: logo_bg.to_string(),
+            }),
+        }
+    }
+
+    /// The icon a raw model name wears: the first matching model mapping that
+    /// names an image. Matching happens before display aliases run, so renaming
+    /// a model does not remove its icon.
+    pub fn model_logo(&self, raw_model: &str) -> Option<Arc<ModelLogo>> {
+        self.model_aliases.iter().find_map(|alias| {
+            let source = alias.logo.trim();
+            if source.is_empty()
+                || !Self::alias_tokens(&alias.from).any(|t| contains_ci(raw_model, t))
+            {
+                return None;
+            }
+            Some(Arc::new(ModelLogo {
+                source: source.to_string(),
+                bg: parse_logo_bg(&alias.logo_bg),
+            }))
+        })
+    }
+
+    /// Drop every entry of one kind whose `from` matches `from`, ignoring case.
+    /// Used when an edited entry is saved under a different prefix.
+    pub fn remove_alias_from(&mut self, kind: AliasKind, from: &str) {
+        let key = Self::normalize_alias_from(from).to_lowercase();
+        self.aliases_mut(kind)
+            .retain(|alias| alias.from.to_lowercase() != key);
     }
 
     /// Drop the abbreviation at `index` of one kind.

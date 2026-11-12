@@ -11,6 +11,7 @@ use crate::format as fmt;
 use crate::model::{self, Protocol, Row};
 use crate::theme::{self, Painter};
 use crate::ui::layout::Metrics;
+use crate::ui::logo::LogoCache;
 use crate::ui::panel::{self, ListView};
 
 /// Horizontal padding inside a cell, on each side.
@@ -283,7 +284,14 @@ fn column_widths(
         .map(|column| {
             let mut width = 0.0f32;
             for row in rows {
-                width = width.max(measure(&column.text(row, now)));
+                let text = column.text(row, now);
+                let mut cell = measure(&text);
+                if *column == Column::Field(DisplayField::Model) && row.logo.is_some() {
+                    // The mark and its gap are part of the cell's width, so the
+                    // text keeps its own breathing room.
+                    cell += (theme::ICON_SIZE + theme::ICON_GAP) * scale;
+                }
+                width = width.max(cell);
             }
             let padded = width + CELL_HPAD * scale * 2.0;
             if *column == Column::Field(DisplayField::Provider) {
@@ -297,7 +305,13 @@ fn column_widths(
 
 /// Draw the table and report the client width that fits it, or `None` when
 /// there is nothing to size.
-pub(super) fn draw(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) -> Option<f32> {
+pub(super) fn draw(
+    p: &Painter,
+    fonts: &theme::Fonts,
+    m: Metrics,
+    v: &ListView,
+    logos: &LogoCache,
+) -> Option<f32> {
     if v.rows.is_empty() {
         panel::draw_empty(p, fonts, m, v);
         return None;
@@ -339,12 +353,51 @@ pub(super) fn draw(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) 
             } else {
                 text
             };
+            let mut text_x = x + hpad;
+            let mut text_w = width - hpad * 2.0;
+            if *column == Column::Field(DisplayField::Model)
+                && let Some(logo) = row.logo.as_ref()
+            {
+                // Whole device pixels for the square and the picture inside it:
+                // a fractional offset makes the mark sit a pixel off centre.
+                let side = (theme::ICON_SIZE * m.scale).round();
+                let left = text_x.round();
+                let top = (rect.y + (rect.h - side) / 2.0).round();
+                if let Some(fill) = logo.bg {
+                    p.round_rect(
+                        left,
+                        top,
+                        side,
+                        side,
+                        (theme::ICON_RADIUS * m.scale).round(),
+                        fill,
+                        true,
+                    );
+                }
+                if let Some(image) = logos.get(&logo.source) {
+                    let inset = if logo.bg.is_some() {
+                        (theme::ICON_INSET * m.scale).round()
+                    } else {
+                        0.0
+                    };
+                    p.draw_image_fit(
+                        image,
+                        left + inset,
+                        top + inset,
+                        side - inset * 2.0,
+                        side - inset * 2.0,
+                    );
+                }
+                let advance = (theme::ICON_SIZE + theme::ICON_GAP) * m.scale;
+                text_x += advance;
+                text_w -= advance;
+            }
             p.dual_text(
                 &fonts.small,
                 &text,
-                x + hpad,
+                text_x,
                 rect.y,
-                width - hpad * 2.0 + CELL_SLACK * m.scale,
+                (text_w + CELL_SLACK * m.scale).max(0.0),
                 rect.h,
                 column.color(row, v, &providers, &models),
                 theme::ALIGN_NEAR,

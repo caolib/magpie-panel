@@ -306,10 +306,14 @@ fn a_config_round_trips_through_json() {
     config.model_aliases.push(NameAlias {
         from: "deepseek".into(),
         to: "ds".into(),
+        logo: String::new(),
+        logo_bg: String::new(),
     });
     config.provider_aliases.push(NameAlias {
         from: "Anthropic".into(),
         to: "A社".into(),
+        logo: String::new(),
+        logo_bg: String::new(),
     });
 
     let json = serde_json::to_string(&config).expect("serializable");
@@ -323,6 +327,49 @@ fn a_config_round_trips_through_json() {
     assert_eq!(back.model_aliases[0].to, "ds");
     assert_eq!(back.provider_aliases[0].to, "A社");
     assert!(back.agent_aliases.is_empty());
+}
+
+#[test]
+fn a_mapping_can_carry_an_icon_and_its_background() {
+    let mut config = Config::default();
+    config.upsert_model_alias("gpt-", "", r"C:\icons\mark.png", "#123456");
+    let logo = config.model_logo("gpt-5.1").expect("mapping icon");
+    assert_eq!(logo.source, r"C:\icons\mark.png");
+    assert_eq!(logo.bg, Some(0xFF12_3456));
+
+    // A mapping without an image wears no icon, whatever the model is called.
+    let mut config = Config::default();
+    config.upsert_alias(AliasKind::Model, "gpt-", "");
+    assert!(config.model_logo("openai/gpt-5").is_none());
+    assert!(config.model_logo("claude-sonnet-4").is_none());
+}
+
+#[test]
+fn icon_backgrounds_parse_colours_and_explain_transparency() {
+    assert_eq!(parse_logo_bg(""), Some(0xFFFF_FFFF));
+    assert_eq!(parse_logo_bg("#fff"), Some(0xFFFF_FFFF));
+    assert_eq!(parse_logo_bg("#0a0b0c"), Some(0xFF0A_0B0C));
+    assert_eq!(parse_logo_bg("80FF0000"), Some(0x80FF_0000));
+    assert_eq!(parse_logo_bg("none"), None);
+    assert_eq!(parse_logo_bg("透明"), None);
+    // Unreadable input keeps the icon visible rather than dropping the fill.
+    assert_eq!(parse_logo_bg("not a colour"), Some(0xFFFF_FFFF));
+}
+
+#[test]
+fn icon_mapping_settings_survive_json_and_old_files() {
+    let mut config = Config::default();
+    config.upsert_model_alias("gpt-", "", r"C:\icons\mark.png", "#ffffff");
+    let json = serde_json::to_string(&config).expect("serializable");
+    assert!(json.contains("\"logoBg\":\"#ffffff\""));
+    let back: Config = serde_json::from_str(&json).expect("deserializable");
+    assert_eq!(back.model_aliases[0].logo, r"C:\icons\mark.png");
+
+    // A file written before the icon fields existed still loads.
+    let legacy: Config =
+        serde_json::from_str(r#"{"modelAliases":[{"from":"gpt-","to":""}]}"#).unwrap();
+    assert!(legacy.model_aliases[0].logo.is_empty());
+    assert!(legacy.model_logo("gpt-5").is_none());
 }
 
 #[test]
@@ -418,6 +465,27 @@ fn model_aliases_update_case_insensitively() {
     assert_eq!(config.model_aliases[0].to, "d");
 
     config.remove_alias(AliasKind::Model, 0);
+    assert!(config.model_aliases.is_empty());
+}
+
+#[test]
+fn a_comma_separated_prefix_stays_one_rule() {
+    let mut config = Config::default();
+    config.upsert_model_alias("deepseek, ds，DS-V3", "", r"C:\icons\mark.png", "");
+    assert_eq!(config.model_aliases.len(), 1);
+    assert_eq!(config.model_aliases[0].from, "deepseek,ds,DS-V3");
+    // Any of the prefixes matches, still through the one rule.
+    assert!(config.model_logo("deepseek-chat").is_some());
+    assert!(config.model_logo("ds-v3").is_some());
+    assert!(config.model_logo("qwen").is_none());
+
+    // Re-adding the same list updates it rather than appending.
+    config.upsert_model_alias("DeepSeek, ds，DS-V3", "ds", "", "");
+    assert_eq!(config.model_aliases.len(), 1);
+    assert_eq!(config.model_aliases[0].to, "ds");
+
+    // Saving an edited entry under a new prefix drops the old one.
+    config.remove_alias_from(AliasKind::Model, "deepseek, ds,DS-V3");
     assert!(config.model_aliases.is_empty());
 }
 

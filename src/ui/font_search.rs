@@ -23,6 +23,9 @@ pub const OPACITY_ID: usize = 2102;
 /// free text, so they must not be read as the numeric box above.
 pub const ALIAS_FROM_ID: usize = 2103;
 pub const ALIAS_TO_ID: usize = 2104;
+/// The model-alias icon: the image path and the colour behind it.
+pub const ALIAS_LOGO_ID: usize = 2106;
+pub const ALIAS_BG_ID: usize = 2107;
 /// The channel-key form: the credential index, then its display alias. The
 /// index is an integer, so a pasted `2.5` is still rejected when it is applied.
 pub const KEY_INDEX_ID: usize = 2105;
@@ -83,7 +86,9 @@ impl SearchBox {
                 WINDOW_EX_STYLE::default(),
                 w!("EDIT"),
                 PCWSTR(text.as_ptr()),
-                WS_CHILD | WS_TABSTOP | WS_BORDER | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
+                // No native border: the parent draws a rounded frame around
+                // this cell and the box sits inside it.
+                WS_CHILD | WS_TABSTOP | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
                 0,
                 0,
                 1,

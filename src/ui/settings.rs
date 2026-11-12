@@ -14,6 +14,8 @@ pub const MIN_WIDTH: f32 = 460.0;
 pub const MIN_HEIGHT: f32 = 420.0;
 const TOP: f32 = 112.0;
 const FOOTER: f32 = 70.0;
+/// Corner radius of the rounded frame around native edit cells.
+const INPUT_RADIUS: f32 = 4.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Tab {
@@ -58,10 +60,18 @@ pub enum Action {
     AliasFromInput,
     /// The short form cell, also a native edit box.
     AliasToInput,
+    /// The model icon path cell.
+    AliasLogoInput,
+    /// The icon background colour cell.
+    AliasBgInput,
+    /// Pick the icon file with the native open dialog.
+    PickLogo,
     /// Take both boxes' text and add (or update) the mapping of the active kind.
     AddAlias,
     /// Drop the mapping at this index of one kind.
     RemoveAlias(AliasKind, usize),
+    /// Fill the form above with this entry so it can be corrected in place.
+    EditAlias(AliasKind, usize),
     Close,
     Confirm,
     Cancel,
@@ -81,6 +91,9 @@ pub struct State {
     pub font_query: String,
     /// Which alias list the mapping form edits.
     pub alias_kind: AliasKind,
+    /// The entry the form is rewriting: its kind and the original `from`
+    /// text. Applying the form replaces that entry instead of adding one.
+    pub alias_edit: Option<(AliasKind, String)>,
 }
 
 impl State {
@@ -134,6 +147,8 @@ struct Label {
     /// Overrides the default text colour, for labels that carry a verdict
     /// (green when a connection answers, red when it does not).
     color: Option<u32>,
+    /// Model mapping rows wear the same icon the table shows.
+    icon: Option<crate::config::ModelLogo>,
 }
 
 impl Layout {
@@ -279,6 +294,7 @@ impl Layout {
             text: text.into(),
             heading,
             color,
+            icon: None,
         });
     }
 
@@ -735,7 +751,7 @@ impl Layout {
         );
         self.label(
             26.0,
-            "匹配不区分大小写，逐条全部替换；简写留空即删除匹配",
+            "匹配不区分大小写，逐条全部替换；同一规则可用逗号写多个前缀；简写留空即删除匹配",
             false,
         );
         // Kind selector; each button carries its own count so the empty lists
@@ -764,6 +780,64 @@ impl Layout {
             AliasKind::Agent => "作用于表格与详情里的发起方（应用）名，如 Claude Code → CC",
         };
         self.label(94.0, hint, false);
+        // Only model mappings wear icons, so the icon row exists only there.
+        let mut list_y = 168.0;
+        if kind == AliasKind::Model {
+            // The icon path, a pick button and the background colour. The
+            // cells are native edits placed by `sync_edit_boxes`.
+            let gap = 8.0;
+            let pick_w = 76.0;
+            let bg_w = 110.0;
+            let logo_x = 24.0;
+            let logo_w = (self.width - 48.0 - pick_w - bg_w - gap * 2.0).max(80.0);
+            self.controls.push(Control {
+                rect: Rect {
+                    x: logo_x,
+                    y: 158.0,
+                    w: logo_w,
+                    h: 30.0,
+                },
+                label: String::new(),
+                action: Action::AliasLogoInput,
+                selected: false,
+                danger: false,
+                body: true,
+                check: false,
+            });
+            self.button(
+                Rect {
+                    x: logo_x + logo_w + gap,
+                    y: 158.0,
+                    w: pick_w,
+                    h: 30.0,
+                },
+                "选择…",
+                Action::PickLogo,
+                false,
+                false,
+                true,
+            );
+            self.controls.push(Control {
+                rect: Rect {
+                    x: logo_x + logo_w + gap + pick_w + gap,
+                    y: 158.0,
+                    w: bg_w,
+                    h: 30.0,
+                },
+                label: String::new(),
+                action: Action::AliasBgInput,
+                selected: false,
+                danger: false,
+                body: true,
+                check: false,
+            });
+            self.label(
+                192.0,
+                "图标：PNG/JPG 路径；底色如 #FFFFFF，留空即白色，none 为透明",
+                false,
+            );
+            list_y = 222.0;
+        }
         // The two native edit cells; the controls only carry geometry so
         // painting and Tab order agree.
         self.controls.push(Control {
@@ -794,6 +868,10 @@ impl Layout {
             body: true,
             check: false,
         });
+        let editing = state
+            .alias_edit
+            .as_ref()
+            .is_some_and(|(edit_kind, _)| *edit_kind == kind);
         self.button(
             Rect {
                 x: self.width - 114.0,
@@ -801,14 +879,14 @@ impl Layout {
                 w: 90.0,
                 h: 30.0,
             },
-            "添加",
+            if editing { "保存" } else { "添加" },
             Action::AddAlias,
-            false,
+            editing,
             false,
             true,
         );
         let aliases = app.config.aliases(kind);
-        let mut y = 168.0;
+        let mut y = list_y;
         if aliases.is_empty() {
             self.label(
                 y,
@@ -828,8 +906,28 @@ impl Layout {
             };
             self.label(y + 5.0, format!("{} → {}", alias.from, to), false);
             if let Some(label) = self.labels.last_mut() {
-                label.rect.w -= 110.0;
+                label.rect.w -= 156.0;
+                let source = alias.logo.trim();
+                if !source.is_empty() {
+                    label.icon = Some(crate::config::ModelLogo {
+                        source: source.to_string(),
+                        bg: crate::config::parse_logo_bg(&alias.logo_bg),
+                    });
+                }
             }
+            self.button(
+                Rect {
+                    x: self.width - 172.0,
+                    y,
+                    w: 70.0,
+                    h: 28.0,
+                },
+                "编辑",
+                Action::EditAlias(kind, index),
+                false,
+                false,
+                true,
+            );
             self.button(
                 Rect {
                     x: self.width - 94.0,
@@ -957,7 +1055,14 @@ impl Layout {
         self.focus_action(state, fonts[index].action.clone());
     }
 
-    pub fn draw(&self, p: &Painter, fonts: &Fonts, state: &State, scale: f32) {
+    pub fn draw(
+        &self,
+        p: &Painter,
+        fonts: &Fonts,
+        state: &State,
+        scale: f32,
+        logos: &crate::ui::logo::LogoCache,
+    ) {
         let text = |rect: Rect, label: &str, heading: bool, color, align| {
             p.dual_text(
                 if heading { &fonts.bold } else { &fonts.small },
@@ -1017,8 +1122,41 @@ impl Layout {
         for label in &self.labels {
             let mut r = label.rect;
             r.y += self.content_top - scroll;
+            let mut text_rect = r;
+            if let Some(icon) = &label.icon
+                && let Some(image) = logos.get(&icon.source)
+            {
+                let side = (theme::ICON_SIZE * scale).round();
+                let x = (r.x * scale).round();
+                let top = ((r.y + (r.h - theme::ICON_SIZE) / 2.0) * scale).round();
+                if let Some(fill) = icon.bg {
+                    p.round_rect(
+                        x,
+                        top,
+                        side,
+                        side,
+                        (theme::ICON_RADIUS * scale).round(),
+                        fill,
+                        true,
+                    );
+                }
+                let inset = if icon.bg.is_some() {
+                    (theme::ICON_INSET * scale).round()
+                } else {
+                    0.0
+                };
+                p.draw_image_fit(
+                    image,
+                    x + inset,
+                    top + inset,
+                    side - inset * 2.0,
+                    side - inset * 2.0,
+                );
+                text_rect.x += theme::ICON_SIZE + 2.0;
+                text_rect.w -= theme::ICON_SIZE + 2.0;
+            }
             text(
-                r,
+                text_rect,
                 &label.text,
                 label.heading,
                 label.color.unwrap_or(if label.heading {
@@ -1034,18 +1172,39 @@ impl Layout {
                 p.reset_clip();
             }
             for c in self.controls.iter().filter(|c| c.body == body) {
-                // Native edit boxes paint themselves over these cells.
+                let r = self.screen_rect(c, state.scroll);
+                if body && (r.y + r.h <= self.content_top || r.y >= self.height - FOOTER) {
+                    continue;
+                }
+                // A native edit box paints its own text and background; the
+                // rounded frame around it is ours, matching the buttons.
                 if matches!(
                     c.action,
                     Action::FontSearch
                         | Action::OpacityInput
                         | Action::AliasFromInput
                         | Action::AliasToInput
+                        | Action::AliasLogoInput
+                        | Action::AliasBgInput
                 ) {
-                    continue;
-                }
-                let r = self.screen_rect(c, state.scroll);
-                if body && (r.y + r.h <= self.content_top || r.y >= self.height - FOOTER) {
+                    let radius = (INPUT_RADIUS * scale).round();
+                    let (x, y) = ((r.x * scale).round(), (r.y * scale).round());
+                    let (w, h) = ((r.w * scale).round(), (r.h * scale).round());
+                    let frame = if state.focus.as_ref() == Some(&c.action) {
+                        theme::TEXT_FAINT
+                    } else {
+                        theme::BORDER
+                    };
+                    p.round_rect(x, y, w, h, radius, frame, true);
+                    p.round_rect(
+                        x + 1.0,
+                        y + 1.0,
+                        w - 2.0,
+                        h - 2.0,
+                        (radius - 1.0).max(0.0),
+                        theme::INPUT_BG,
+                        true,
+                    );
                     continue;
                 }
                 let enabled = self.enabled(state, c);
@@ -1129,7 +1288,7 @@ impl Layout {
         let hint = match state.pending {
             Some(Action::RemoveAccount(_)) => "确认删除该连接及其本机密钥？此操作无法撤销。",
             Some(Action::ClearKeys) => "确认清除所有连接的网关密钥？远程网关将无法连接。",
-            _ => "设置即时生效并自动保存 · 失焦或 Esc 关闭",
+            _ => "设置即时生效并自动保存 · Esc 关闭",
         };
         text(
             Rect {

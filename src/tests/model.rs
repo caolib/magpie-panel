@@ -142,6 +142,8 @@ fn account_visibility_uses_each_raw_supplier_identity_before_aliasing() {
         provider_aliases: vec![crate::config::NameAlias {
             from: "Provider".into(),
             to: "P".into(),
+            logo: String::new(),
+            logo_bg: String::new(),
         }],
         ..Default::default()
     };
@@ -428,10 +430,14 @@ fn model_names_are_shortened_and_aliases_apply_in_order() {
         crate::config::NameAlias {
             from: "claude".into(),
             to: "c".into(),
+            logo: String::new(),
+            logo_bg: String::new(),
         },
         crate::config::NameAlias {
             from: "sonnet".into(),
             to: "s".into(),
+            logo: String::new(),
+            logo_bg: String::new(),
         },
     ];
     assert_eq!(
@@ -442,6 +448,8 @@ fn model_names_are_shortened_and_aliases_apply_in_order() {
     let delete = [crate::config::NameAlias {
         from: "-20250514".into(),
         to: String::new(),
+        logo: String::new(),
+        logo_bg: String::new(),
     }];
     assert_eq!(
         display_model_name("openai/gpt-x-20250514", &delete),
@@ -454,9 +462,25 @@ fn aliases_rewrite_whole_names_without_shortening_them() {
     let aliases = [crate::config::NameAlias {
         from: "anthropic".into(),
         to: "A".into(),
+        logo: String::new(),
+        logo_bg: String::new(),
     }];
     assert_eq!(apply_aliases("Anthropic", &aliases), "A");
     assert_eq!(apply_aliases("Claude Code", &[]), "Claude Code");
+}
+
+#[test]
+fn one_rule_can_match_several_provider_or_agent_names() {
+    use crate::config::{AliasKind, Config};
+    let mut config = Config::default();
+    config.upsert_alias(AliasKind::Agent, "claude code, claude", "cc");
+    config.upsert_alias(AliasKind::Provider, "anthropic,openai", "A");
+    assert_eq!(config.agent_aliases.len(), 1);
+    assert_eq!(apply_aliases("Claude Code", &config.agent_aliases), "cc");
+    assert_eq!(apply_aliases("Claude", &config.agent_aliases), "cc");
+    assert_eq!(apply_aliases("Anthropic", &config.provider_aliases), "A");
+    assert_eq!(apply_aliases("OpenAI", &config.provider_aliases), "A");
+    assert_eq!(apply_aliases("Google", &config.provider_aliases), "Google");
 }
 
 #[test]

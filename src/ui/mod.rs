@@ -3,6 +3,7 @@ pub mod detail;
 pub mod font_search;
 pub mod layout;
 pub mod login;
+pub mod logo;
 pub mod panel;
 pub mod settings;
 pub mod table;

@@ -120,7 +120,7 @@ cargo run --release
 | 属性显示 | 逐项开关表格列、上移 / 下移调整列顺序、恢复默认顺序、进行中请求置顶、按模型分组 |
 | 连接 | 添加 / 编辑 / 测试 / 删除 Magpie 连接，清空已保存密钥 |
 | 供应商过滤 | 按（连接，供应商）隐藏不关心的请求 |
-| 名称映射 | 一个界面管理三类显示名缩写：模型、供应商、发起方（应用）。匹配不区分大小写、逐条全部替换，留空即删除匹配 |
+| 名称映射 | 一个界面管理三类显示名缩写：模型、供应商、发起方（应用）。匹配不区分大小写、逐条全部替换，留空即删除匹配；一条规则的前缀可用逗号分隔（`deepseek,ds` → 空 仍是一条规则，命中任一前缀即生效）。每条可点「编辑」回填表单修改。模型映射还可指定图标文件（PNG/JPG）与圆角底色，显示在该模型名之前 |
 
 名称配色提供「经典 / Nord / One Dark / Dracula」，默认经典，切换立即生效并保存。
 仅影响模型名与供应商，背景和状态颜色不变。两列各自从当前记录底部向上首次遇到的名称
@@ -163,7 +163,8 @@ cargo run --release
     { "id": "a1", "name": "本机", "endpoint": "http://127.0.0.1:3425" }
   ],
   "hiddenProviders": [],      // [{ "accountId": "a1", "provider": "anthropic" }]
-  "modelAliases": [],         // [{ "from": "anthropic/", "to": "" }]
+  "modelAliases": [],         // [{ "from": "gpt-", "to": "", "logo": "C:\\icons\\chatgpt.png", "logoBg": "#FFFFFF" }]
+                              // logo: PNG/JPG 路径；logoBg: 圆角底色，#RRGGBB，#AARRGGBB，留空为白色，none 为透明
   "providerAliases": [],      // [{ "from": "Anthropic", "to": "A社" }]
   "agentAliases": [],         // [{ "from": "Claude Code", "to": "CC" }]
   "hiddenFields": ["upstreamModel", "protocol", "cacheWrite", "cost", "completion", "source", "account"],
@@ -236,7 +237,7 @@ GET {endpoint}/v1/magpie/concurrency
 | `ui/font_search.rs` | 支持中文输入法的原生字体搜索框 |
 | `ui/clipboard.rs` | 详情复制到剪贴板 |
 | `font_catalog.rs` | 本地字体枚举与中文覆盖检测 |
-| `popup.rs` | 弹窗点击位置定位与失焦关闭 |
+| `popup.rs` | 弹窗点击位置定位；详情弹窗失焦关闭（设置窗口不随失焦关闭） |
 | `settings_window.rs` | 设置窗口生命周期、交互与连接编辑往返 |
 
 ## 友情链接

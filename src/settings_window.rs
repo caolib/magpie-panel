@@ -10,7 +10,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_F, VK_HOME, VK_NEXT, VK_PRIOR, VK_RETURN, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::w;
+use windows::core::{PCWSTR, PWSTR, w};
 
 use crate::app::{LoginTarget, View};
 use crate::config::{OPACITY_MAX, OPACITY_MIN, WindowLevel, WindowState};
@@ -44,7 +44,16 @@ pub struct Popup {
     /// Model-alias form: the prefix to match and its short form.
     alias_from: Option<SearchBox>,
     alias_to: Option<SearchBox>,
+    /// Model-alias form: the icon file and the colour behind it.
+    alias_logo: Option<SearchBox>,
+    alias_bg: Option<SearchBox>,
 }
+
+/// Horizontal gap between a native edit control and the rounded frame the
+/// parent paints around it, in logical pixels.
+const EDIT_INSET: f32 = 4.0;
+/// Height of a one-line edit control, in logical pixels.
+const EDIT_LINE_H: f32 = 18.0;
 
 /// Restore the panel after editing an account, including a previously open form.
 pub struct LoginReturn {
@@ -149,6 +158,8 @@ pub fn open(owner: HWND, point: POINT) {
             opacity: None,
             alias_from: None,
             alias_to: None,
+            alias_logo: None,
+            alias_bg: None,
         })
     });
     crate::apply_window_chrome(hwnd);
@@ -214,6 +225,8 @@ fn sync_edit_boxes(hwnd: HWND) {
     let opacity = layout.edit_box_rect(&Action::OpacityInput, scroll);
     let alias_from = layout.edit_box_rect(&Action::AliasFromInput, scroll);
     let alias_to = layout.edit_box_rect(&Action::AliasToInput, scroll);
+    let alias_logo = layout.edit_box_rect(&Action::AliasLogoInput, scroll);
+    let alias_bg = layout.edit_box_rect(&Action::AliasBgInput, scroll);
     sync_box(hwnd, search, &query, font_search::ID, search_slot);
     sync_box(
         hwnd,
@@ -231,6 +244,14 @@ fn sync_edit_boxes(hwnd: HWND) {
         alias_from_slot,
     );
     sync_box(hwnd, alias_to, "", font_search::ALIAS_TO_ID, alias_to_slot);
+    sync_box(
+        hwnd,
+        alias_logo,
+        "",
+        font_search::ALIAS_LOGO_ID,
+        alias_logo_slot,
+    );
+    sync_box(hwnd, alias_bg, "", font_search::ALIAS_BG_ID, alias_bg_slot);
 }
 
 fn search_slot(popup: &mut Popup) -> &mut Option<SearchBox> {
@@ -245,6 +266,12 @@ fn alias_from_slot(popup: &mut Popup) -> &mut Option<SearchBox> {
 }
 fn alias_to_slot(popup: &mut Popup) -> &mut Option<SearchBox> {
     &mut popup.alias_to
+}
+fn alias_logo_slot(popup: &mut Popup) -> &mut Option<SearchBox> {
+    &mut popup.alias_logo
+}
+fn alias_bg_slot(popup: &mut Popup) -> &mut Option<SearchBox> {
+    &mut popup.alias_bg
 }
 
 /// Place one native edit box over its layout cell: create it on first use,
@@ -307,13 +334,18 @@ fn sync_box(
                 );
                 let _ = DeleteObject(HGDIOBJ(old.0));
             }
+            // Keep the text off the parent's rounded frame. A single-line edit
+            // draws its text from the top, so the control is only one line
+            // tall and centred in the cell instead of filling it.
+            let inset = EDIT_INSET * scale;
+            let line_h = (EDIT_LINE_H * scale).round();
             let _ = SetWindowPos(
                 child,
                 None,
-                (rect.x * scale).round() as i32,
-                (rect.y * scale).round() as i32,
-                (rect.w * scale).round() as i32,
-                (rect.h * scale).round() as i32,
+                (rect.x * scale + inset).round() as i32,
+                (rect.y * scale + (rect.h * scale - line_h) / 2.0).round() as i32,
+                (rect.w * scale - inset * 2.0).round() as i32,
+                line_h as i32,
                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
             );
         }
@@ -367,13 +399,6 @@ fn hit(hwnd: HWND, lp: LPARAM) -> Option<Action> {
 
 unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
-        WM_ACTIVATE => {
-            if wp.0 as u32 & 0xFFFF == WA_INACTIVE {
-                crate::popup::dismiss_later(hwnd);
-            }
-            return unsafe { DefWindowProcW(hwnd, msg, wp, lp) };
-        }
-        crate::popup::WM_DISMISS => crate::popup::dismiss_if_inactive(hwnd),
         WM_COMMAND if wp.0 & 0xFFFF == font_search::ID => {
             if (wp.0 >> 16) as u32 == EN_CHANGE {
                 let query = font_search::query(HWND(lp.0 as *mut _));
@@ -407,6 +432,10 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                         p.ui.focus = Some(Action::AliasFromInput);
                     } else if p.alias_to.as_ref().is_some_and(|b| b.hwnd == focused) {
                         p.ui.focus = Some(Action::AliasToInput);
+                    } else if p.alias_logo.as_ref().is_some_and(|b| b.hwnd == focused) {
+                        p.ui.focus = Some(Action::AliasLogoInput);
+                    } else if p.alias_bg.as_ref().is_some_and(|b| b.hwnd == focused) {
+                        p.ui.focus = Some(Action::AliasBgInput);
                     }
                 }
             });
@@ -420,6 +449,8 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                     p.opacity.as_ref(),
                     p.alias_from.as_ref(),
                     p.alias_to.as_ref(),
+                    p.alias_logo.as_ref(),
+                    p.alias_bg.as_ref(),
                 ]
                 .into_iter()
                 .flatten()
@@ -757,7 +788,10 @@ fn key(hwnd: HWND, key: u16) {
             dispatch(hwnd, Action::SaveOpacity);
         } else if matches!(
             focused,
-            Some(Action::AliasFromInput) | Some(Action::AliasToInput)
+            Some(Action::AliasFromInput)
+                | Some(Action::AliasToInput)
+                | Some(Action::AliasLogoInput)
+                | Some(Action::AliasBgInput)
         ) && key == VK_RETURN.0
         {
             // Enter inside either alias box adds the mapping.
@@ -778,6 +812,31 @@ fn key(hwnd: HWND, key: u16) {
         };
         scroll(hwnd, delta);
     }
+}
+
+/// Ask Windows for an image file the loader can decode (PNG, JPEG, …).
+fn pick_image(owner: HWND) -> Option<String> {
+    use windows::Win32::UI::Controls::Dialogs::{
+        GetOpenFileNameW, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST, OPENFILENAMEW,
+    };
+    let filter: Vec<u16> = "图片\0*.png;*.jpg;*.jpeg;*.bmp;*.gif\0所有文件\0*.*\0\0"
+        .encode_utf16()
+        .collect();
+    let mut buffer = vec![0u16; 1024];
+    let mut dialog = OPENFILENAMEW {
+        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+        hwndOwner: owner,
+        lpstrFilter: PCWSTR(filter.as_ptr()),
+        lpstrFile: PWSTR(buffer.as_mut_ptr()),
+        nMaxFile: buffer.len() as u32,
+        Flags: OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
+        ..Default::default()
+    };
+    if !unsafe { GetOpenFileNameW(&mut dialog) }.as_bool() {
+        return None;
+    }
+    let end = buffer.iter().position(|c| *c == 0).unwrap_or(buffer.len());
+    Some(String::from_utf16_lossy(&buffer[..end]))
 }
 
 fn dispatch(hwnd: HWND, action: Action) {
@@ -970,13 +1029,30 @@ fn dispatch(hwnd: HWND, action: Action) {
             PanelState::with(|s| {
                 if let Some(p) = s.settings.as_mut() {
                     p.ui.alias_kind = kind;
+                    p.ui.alias_edit = None;
                     p.ui.hover = None;
                     p.ui.pressed = None;
                 }
                 s.app.rebuild();
             });
         }
-        Action::AliasFromInput | Action::AliasToInput => focus_control(hwnd, true),
+        Action::AliasFromInput
+        | Action::AliasToInput
+        | Action::AliasLogoInput
+        | Action::AliasBgInput => focus_control(hwnd, true),
+        Action::PickLogo => {
+            if let Some(path) = pick_image(hwnd) {
+                let logo_box = PanelState::with(|s| {
+                    s.settings
+                        .as_ref()
+                        .and_then(|p| p.alias_logo.as_ref().map(|b| b.hwnd))
+                })
+                .flatten();
+                if let Some(logo_box) = logo_box {
+                    font_search::set_text(logo_box, &path);
+                }
+            }
+        }
         Action::AddAlias => {
             let boxes = PanelState::with(|s| {
                 let p = s.settings.as_ref()?;
@@ -984,30 +1060,93 @@ fn dispatch(hwnd: HWND, action: Action) {
                     p.ui.alias_kind,
                     p.alias_from.as_ref().map(|b| b.hwnd),
                     p.alias_to.as_ref().map(|b| b.hwnd),
+                    p.alias_logo.as_ref().map(|b| b.hwnd),
+                    p.alias_bg.as_ref().map(|b| b.hwnd),
                 ))
             })
             .flatten();
-            if let Some((kind, Some(from_box), Some(to_box))) = boxes {
+            if let Some((kind, Some(from_box), Some(to_box), logo_box, bg_box)) = boxes {
                 let from = font_search::query(from_box).trim().to_string();
                 // An empty short form is allowed: it deletes the matched
                 // prefix instead of replacing it.
                 let to = font_search::query(to_box).trim().to_string();
-                if !from.is_empty() {
+                let logo = logo_box.map(|b| font_search::query(b).trim().to_string());
+                let bg = bg_box.map(|b| font_search::query(b).trim().to_string());
+                // Saving an edited entry rewrites the original one; leaving the
+                // prefix blank drops it.
+                let editing = PanelState::with(|s| {
+                    let p = s.settings.as_ref()?;
+                    let (edit_kind, old_from) = p.ui.alias_edit.clone()?;
+                    (edit_kind == kind).then_some(old_from)
+                })
+                .flatten();
+                if !from.is_empty() || editing.is_some() {
                     PanelState::with(|s| {
-                        s.app.config.upsert_alias(kind, &from, &to);
+                        if let Some(old_from) = editing {
+                            s.app.config.remove_alias_from(kind, &old_from);
+                        }
+                        if !from.is_empty() {
+                            match (kind, logo, bg) {
+                                (crate::config::AliasKind::Model, Some(logo), Some(bg)) => {
+                                    s.app.config.upsert_model_alias(&from, &to, &logo, &bg)
+                                }
+                                _ => s.app.config.upsert_alias(kind, &from, &to),
+                            }
+                        }
+                        if let Some(p) = s.settings.as_mut() {
+                            p.ui.alias_edit = None;
+                        }
                         s.app.save();
                         // Already-visible cards pick up the new names at once.
                         s.app.rebuild();
                     });
                     // A fresh round of input starts from empty boxes.
-                    font_search::set_text(from_box, "");
-                    font_search::set_text(to_box, "");
+                    for box_ in [from_box, to_box].into_iter().chain(logo_box).chain(bg_box) {
+                        font_search::set_text(box_, "");
+                    }
                 }
+            }
+        }
+        Action::EditAlias(kind, index) => {
+            // Load the entry into the form and remember it: saving replaces it
+            // instead of adding a duplicate.
+            let filled = PanelState::with(|s| {
+                let alias = s.app.config.aliases(kind).get(index)?.clone();
+                let p = s.settings.as_mut()?;
+                let from = p.alias_from.as_ref()?.hwnd;
+                let to = p.alias_to.as_ref()?.hwnd;
+                let logo = p.alias_logo.as_ref().map(|b| b.hwnd);
+                let bg = p.alias_bg.as_ref().map(|b| b.hwnd);
+                p.ui.alias_kind = kind;
+                p.ui.alias_edit = Some((kind, alias.from.clone()));
+                p.ui.scroll = 0.0;
+                p.ui.focus = Some(Action::AliasFromInput);
+                p.ui.hover = None;
+                p.ui.pressed = None;
+                Some((alias, from, to, logo, bg))
+            })
+            .flatten();
+            if let Some((alias, from, to, logo, bg)) = filled {
+                font_search::set_text(from, &alias.from);
+                font_search::set_text(to, &alias.to);
+                if let Some(box_) = logo {
+                    font_search::set_text(box_, &alias.logo);
+                }
+                if let Some(box_) = bg {
+                    font_search::set_text(box_, &alias.logo_bg);
+                }
+                sync_edit_boxes(hwnd);
+                focus_control(hwnd, true);
             }
         }
         Action::RemoveAlias(kind, index) => {
             PanelState::with(|s| {
                 s.app.config.remove_alias(kind, index);
+                if let Some(p) = s.settings.as_mut()
+                    && p.ui.alias_edit.as_ref().is_some_and(|(k, _)| *k == kind)
+                {
+                    p.ui.alias_edit = None;
+                }
                 s.app.save();
                 s.app.rebuild();
             });
@@ -1033,10 +1172,20 @@ fn paint(hwnd: HWND) {
         let hdc = BeginPaint(hwnd, &mut ps);
         let mut rc = RECT::default();
         let _ = GetClientRect(hwnd, &mut rc);
+        PanelState::with(|s| {
+            s.logos.refresh(
+                s.app
+                    .config
+                    .model_aliases
+                    .iter()
+                    .map(|alias| alias.logo.trim())
+                    .filter(|logo| !logo.is_empty()),
+            );
+        });
         crate::with_double_buffer(hdc, rc, |painter| {
             PanelState::with(|s| {
                 if let Some(p) = s.settings.as_ref() {
-                    layout.draw(&painter, &p.fonts, &p.ui, p.scale);
+                    layout.draw(&painter, &p.fonts, &p.ui, p.scale, &s.logos);
                 }
             });
         });

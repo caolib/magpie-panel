@@ -510,6 +510,37 @@ fn supplier_ellipsis_preserves_short_text_and_never_splits_unicode() {
 }
 
 #[test]
+fn a_mapped_icon_reserves_room_before_the_model_name() {
+    let measure = |s: &str| s.chars().count() as f32;
+    let columns = [Column::Field(DisplayField::Model)];
+    let mut config = crate::config::Config::default();
+    config.upsert_model_alias("gpt-", "", r"C:\icons\mark.png", "#123456");
+
+    let gpt = [row(r#"{"model":"gpt-5"}"#).for_display(&config)];
+    assert!(gpt[0].logo.is_some(), "the mapping supplies the mark");
+    // The mapping also strips "gpt-", so the text is one character wide.
+    let widths = column_widths(&gpt, &columns, 0, 1.0, measure);
+    assert_eq!(
+        widths[0],
+        1.0 + theme::ICON_SIZE + theme::ICON_GAP + CELL_HPAD * 2.0,
+        "the mark and its gap widen the cell"
+    );
+
+    // No mapping, no icon: the same row keeps its plain text width.
+    let plain = [row(r#"{"model":"gpt-5"}"#).for_display(&crate::config::Config::default())];
+    assert!(plain[0].logo.is_none());
+    let widths = column_widths(&plain, &columns, 0, 1.0, measure);
+    assert_eq!(widths[0], 5.0 + CELL_HPAD * 2.0);
+
+    // The icon is decided on the raw model, so stripping "gpt-" from the
+    // visible name does not remove it.
+    assert_eq!(gpt[0].display_model(), "5");
+    let logo = gpt[0].logo.as_ref().expect("mapped icon");
+    assert_eq!(logo.source, r"C:\icons\mark.png");
+    assert_eq!(logo.bg, Some(0xFF12_3456));
+}
+
+#[test]
 fn columns_are_as_wide_as_their_widest_cell() {
     let rows = vec![
         row(r#"{"model":"short"}"#),

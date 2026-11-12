@@ -912,6 +912,8 @@ fn the_mappings_tab_lists_the_active_kinds_aliases() {
     app.config.model_aliases = vec![NameAlias {
         from: "deepseek".into(),
         to: "ds".into(),
+        logo: String::new(),
+        logo_bg: String::new(),
     }];
     let state = State {
         tab: Tab::Mappings,
@@ -921,6 +923,9 @@ fn the_mappings_tab_lists_the_active_kinds_aliases() {
     for action in [
         Action::AliasFromInput,
         Action::AliasToInput,
+        Action::AliasLogoInput,
+        Action::AliasBgInput,
+        Action::PickLogo,
         Action::AddAlias,
         Action::RemoveAlias(AliasKind::Model, 0),
     ] {
@@ -929,11 +934,85 @@ fn the_mappings_tab_lists_the_active_kinds_aliases() {
 }
 
 #[test]
+fn only_model_mappings_offer_an_icon() {
+    let mut app = app();
+    app.config.provider_aliases = vec![NameAlias {
+        from: "Anthropic".into(),
+        to: "A社".into(),
+        logo: String::new(),
+        logo_bg: String::new(),
+    }];
+    let mut state = State {
+        tab: Tab::Mappings,
+        ..State::default()
+    };
+    let icon_actions = [
+        Action::AliasLogoInput,
+        Action::AliasBgInput,
+        Action::PickLogo,
+    ];
+    let l = Layout::new(&app, &state, WIDTH, HEIGHT);
+    for action in &icon_actions {
+        assert!(l.controls.iter().any(|c| c.action == *action), "{action:?}");
+    }
+    // Provider names are not models, so the icon row disappears with the tab.
+    state.alias_kind = AliasKind::Provider;
+    let l = Layout::new(&app, &state, WIDTH, HEIGHT);
+    for action in &icon_actions {
+        assert!(
+            !l.controls.iter().any(|c| c.action == *action),
+            "{action:?} should be hidden"
+        );
+    }
+}
+
+#[test]
+fn a_mapping_row_offers_edit_beside_delete() {
+    let mut app = app();
+    app.config.provider_aliases = vec![NameAlias {
+        from: "Anthropic".into(),
+        to: "A社".into(),
+        logo: String::new(),
+        logo_bg: String::new(),
+    }];
+    let mut state = State {
+        tab: Tab::Mappings,
+        alias_kind: AliasKind::Provider,
+        ..State::default()
+    };
+    let l = Layout::new(&app, &state, WIDTH, HEIGHT);
+    let edit = l
+        .controls
+        .iter()
+        .find(|c| c.action == Action::EditAlias(AliasKind::Provider, 0))
+        .expect("edit button");
+    let delete = l
+        .controls
+        .iter()
+        .find(|c| c.action == Action::RemoveAlias(AliasKind::Provider, 0))
+        .expect("delete button");
+    assert!(edit.rect.x < delete.rect.x);
+    assert_eq!(edit.rect.y, delete.rect.y);
+
+    // While an entry is being edited the form button reads 保存.
+    state.alias_edit = Some((AliasKind::Provider, "Anthropic".into()));
+    let l = Layout::new(&app, &state, WIDTH, HEIGHT);
+    let save = l
+        .controls
+        .iter()
+        .find(|c| c.action == Action::AddAlias)
+        .expect("form button");
+    assert_eq!(save.label, "保存");
+}
+
+#[test]
 fn the_mappings_tab_switches_kinds_and_lists_that_kinds_entries() {
     let mut app = app();
     app.config.provider_aliases = vec![NameAlias {
         from: "Anthropic".into(),
         to: "A社".into(),
+        logo: String::new(),
+        logo_bg: String::new(),
     }];
     let mut state = State {
         tab: Tab::Mappings,
@@ -970,6 +1049,8 @@ fn native_edit_boxes_are_placed_over_their_cells() {
     app.config.model_aliases = vec![NameAlias {
         from: "a".into(),
         to: "b".into(),
+        logo: String::new(),
+        logo_bg: String::new(),
     }];
     let state = State {
         tab: Tab::Mappings,
