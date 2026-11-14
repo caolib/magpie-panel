@@ -22,7 +22,7 @@ fn details_only_contain_the_five_requested_fields() {
     assert_eq!(doc.rows.len(), 1);
     assert_eq!(
         doc.rows[0].cells(),
-        ["502", "Anthropic(main)", "model", "", "upstream said no"]
+        ["502", "Anthropic-main", "model", "", "upstream said no"]
     );
     let text = plain_text(&doc);
     for label in HEADERS {
@@ -74,7 +74,7 @@ fn recovered_success_keeps_each_failure_and_final_result_in_order() {
     assert!(
         doc.rows
             .iter()
-            .all(|r| r.provider == "Provider(friendly-key)" && r.model == "model")
+            .all(|r| r.provider == "Provider-friendly-key" && r.model == "model")
     );
     assert!(doc.notice.is_empty());
     assert_eq!(doc.rows[0].color, theme::RED);
@@ -115,9 +115,9 @@ fn trace_and_history_show_each_attempts_account_without_aliasing_it() {
             .iter()
             .map(|r| r.provider.as_str())
             .collect::<Vec<_>>(),
-        ["P(Provider-a)", "P(Provider-b)"]
+        ["P-Provider-a", "P-Provider-b"]
     );
-    assert!(plain_text(&doc).contains("供应商: P(Provider-b)"));
+    assert!(plain_text(&doc).contains("供应商: P-Provider-b"));
 
     detail.source = DetailSource::History;
     detail.attempts = [
@@ -133,7 +133,7 @@ fn trace_and_history_show_each_attempts_account_without_aliasing_it() {
             .iter()
             .map(|r| r.provider.as_str())
             .collect::<Vec<_>>(),
-        ["P(Provider-a)", "P(Provider-b)"]
+        ["P-Provider-a", "P-Provider-b"]
     );
 }
 
@@ -151,11 +151,11 @@ fn loading_details_preserve_connection_visibility_and_key_fallback() {
     for (json, expected) in [
         (
             r#"{"provider":"multi","providerName":"Provider","providerAccount":"team","providerKeyName":"key"}"#,
-            "P(team)",
+            "P-team",
         ),
         (
             r#"{"providerName":"Provider","providerAccount":"team"}"#,
-            "P(team)",
+            "P-team",
         ),
         (
             r#"{"provider":"single","providerName":"Provider","providerAccount":"only"}"#,
@@ -163,7 +163,7 @@ fn loading_details_preserve_connection_visibility_and_key_fallback() {
         ),
         (
             r#"{"provider":"single","providerName":"Provider","providerAccount":"only","providerKeyName":"key"}"#,
-            "P(key)",
+            "P-key",
         ),
     ] {
         let mut raw = row(json);
@@ -187,7 +187,7 @@ fn trace_uses_selected_connections_multi_account_set_for_each_supplier() {
     );
     assert_eq!(doc.rows.len(), 2);
     assert_eq!(doc.rows[0].provider, "Provider");
-    assert_eq!(doc.rows[1].provider, "Provider(a)");
+    assert_eq!(doc.rows[1].provider, "Provider-a");
 }
 
 #[test]
@@ -244,7 +244,7 @@ fn trace_and_history_only_expand_suppliers_with_distinct_accounts() {
                 .iter()
                 .map(|entry| entry.provider.as_str())
                 .collect::<Vec<_>>(),
-            ["OldP(a)", "P", "P(key)", fmt::BLANK, fmt::BLANK, "P(b)"]
+            ["OldP-a", "P", "P-key", fmt::BLANK, fmt::BLANK, "P-b"]
         );
         assert!(raw.multi_account_providers.is_empty());
     }
@@ -283,8 +283,8 @@ fn selected_row_and_historical_retry_jointly_reveal_both_accounts() {
     ).unwrap()));
     let doc = Doc::with_detail(&raw, &detail, &Config::default());
     assert_eq!(doc.rows.len(), 2);
-    assert_eq!(doc.rows[0].provider, "Provider(earlier)");
-    assert_eq!(doc.rows[1].provider, "Provider(selected)");
+    assert_eq!(doc.rows[0].provider, "Provider-earlier");
+    assert_eq!(doc.rows[1].provider, "Provider-selected");
     assert!(raw.multi_account_providers.is_empty());
 }
 
@@ -304,7 +304,7 @@ fn trace_cannot_hide_a_selected_account_when_another_or_no_account_is_recorded()
         });
         let doc = Doc::with_detail(&raw, &detail, &Config::default());
         assert_eq!(doc.rows.len(), 2);
-        assert_eq!(doc.rows[1].provider, "P(selected)");
+        assert_eq!(doc.rows[1].provider, "P-selected");
     }
 }
 
@@ -390,7 +390,7 @@ fn copy_preserves_long_multiline_errors_and_mapping_is_applied_once() {
     let doc = Doc::with_detail(&raw, &detail, &config);
     assert_eq!(doc.rows.len(), 1);
     assert_eq!(doc.rows[0].model, "a");
-    assert_eq!(doc.rows[0].provider, "a(aa-key)");
+    assert_eq!(doc.rows[0].provider, "a-aa-key");
     let text = plain_text(&doc);
     assert_eq!(text.matches(&error).count(), 1);
     assert!(text.contains("模型: a\n"));

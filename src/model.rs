@@ -27,7 +27,8 @@ pub fn short_model_name(model: &str) -> &str {
 }
 
 /// One supplier cell: prefer the subscription account, otherwise the upstream
-/// key name. These are display labels, never credentials or provider aliases.
+/// key name, joined to the provider with `-`. These are display labels, never
+/// credentials or provider aliases.
 pub fn provider_label(
     provider: Option<&str>,
     account: Option<&str>,
@@ -38,9 +39,9 @@ pub fn provider_label(
         .filter(|s| !s.is_empty())
         .or_else(|| key.map(str::trim).filter(|s| !s.is_empty()));
     match (provider, suffix) {
-        (Some(provider), Some(suffix)) => Some(format!("{provider}({suffix})")),
+        (Some(provider), Some(suffix)) => Some(format!("{provider}-{suffix}")),
         (Some(provider), None) => Some(provider.to_string()),
-        (None, Some(suffix)) => Some(format!("({suffix})")),
+        (None, Some(suffix)) => Some(suffix.to_string()),
         (None, None) => None,
     }
 }

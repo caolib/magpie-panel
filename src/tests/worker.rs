@@ -63,7 +63,7 @@ fn account_inventory_controls_labels_even_when_only_one_account_has_recent_rows(
         provider_row("single", "deleted"),
     ];
     inventory.annotate(&mut rows);
-    assert_eq!(rows[0].provider_label().as_deref(), Some("multi(first)"));
+    assert_eq!(rows[0].provider_label().as_deref(), Some("multi-first"));
     assert_eq!(rows[1].provider_label().as_deref(), Some("single"));
     assert_eq!(rows[2].provider_label().as_deref(), Some("single"));
     assert!(Arc::ptr_eq(
@@ -71,7 +71,7 @@ fn account_inventory_controls_labels_even_when_only_one_account_has_recent_rows(
         &rows[1].multi_account_providers
     ));
     rows.truncate(1); // Display filtering cannot hide the inventory's second account.
-    assert_eq!(rows[0].provider_label().as_deref(), Some("multi(first)"));
+    assert_eq!(rows[0].provider_label().as_deref(), Some("multi-first"));
 }
 
 #[test]
@@ -83,11 +83,11 @@ fn missing_inventory_uses_recorded_accounts_without_mixing_connections() {
         provider_row("p", "b"),
     ];
     inventory.annotate(&mut rows);
-    assert_eq!(rows[0].provider_label().as_deref(), Some("p(a)"));
+    assert_eq!(rows[0].provider_label().as_deref(), Some("p-a"));
     let mut other_connection = vec![provider_row("p", "c")];
     inventory.annotate(&mut other_connection);
     assert_eq!(other_connection[0].provider_label().as_deref(), Some("p"));
-    assert_eq!(rows[0].provider_label().as_deref(), Some("p(a)"));
+    assert_eq!(rows[0].provider_label().as_deref(), Some("p-a"));
 }
 
 #[test]

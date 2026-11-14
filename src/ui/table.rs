@@ -247,19 +247,15 @@ pub(crate) fn ellipsize(text: &str, max_width: f32, measure: impl Fn(&str) -> f3
     if measure(text) <= max_width {
         return text.into();
     }
-    let suffix = if text.ends_with(')') { "…)" } else { "…" };
-    if measure(suffix) > max_width {
-        return if measure("…") <= max_width {
-            "…".into()
-        } else {
-            String::new()
-        };
+    const ELLIPSIS: &str = "…";
+    if measure(ELLIPSIS) > max_width {
+        return String::new();
     }
     let boundaries: Vec<_> = text.char_indices().map(|(index, _)| index).collect();
     let (mut low, mut high) = (0, boundaries.len());
     while low < high {
         let mid = (low + high) / 2;
-        let candidate = format!("{}{}", &text[..boundaries[mid]], suffix);
+        let candidate = format!("{}{ELLIPSIS}", &text[..boundaries[mid]]);
         if measure(&candidate) <= max_width {
             low = mid + 1;
         } else {
@@ -267,7 +263,7 @@ pub(crate) fn ellipsize(text: &str, max_width: f32, measure: impl Fn(&str) -> f3
         }
     }
     let end = low.checked_sub(1).map_or(0, |index| boundaries[index]);
-    format!("{}{}", &text[..end], suffix)
+    format!("{}{ELLIPSIS}", &text[..end])
 }
 
 /// Width of every column: widest cell plus padding, with a supplier cap.

@@ -214,23 +214,23 @@ fn provider_cell_distinguishes_accounts_and_keeps_key_only_labels() {
     for (json, expected) in [
         (
             r#"{"providerName":"Provider","providerAccount":"first"}"#,
-            "Provider(first)",
+            "Provider-first",
         ),
         (
             r#"{"providerName":"Provider","providerAccount":"second"}"#,
-            "Provider(second)",
+            "Provider-second",
         ),
         (
             r#"{"providerName":"Provider","providerAccount":"long-account"}"#,
-            "Provider(long-a)",
+            "Provider-long-a",
         ),
         (
             r#"{"providerName":"Provider","providerAccount":"中文账号名称七"}"#,
-            "Provider(中文账号名称)",
+            "Provider-中文账号名称",
         ),
         (
             r#"{"providerName":"Provider","providerKeyName":"key"}"#,
-            "Provider(key)",
+            "Provider-key",
         ),
         (
             r#"{"providerName":"Other","providerAccount":"only"}"#,
@@ -238,7 +238,7 @@ fn provider_cell_distinguishes_accounts_and_keeps_key_only_labels() {
         ),
         (
             r#"{"providerName":"Other","providerAccount":"only","providerKeyName":"key"}"#,
-            "Other(key)",
+            "Other-key",
         ),
     ] {
         let mut row = row(json);
@@ -485,7 +485,7 @@ fn supplier_width_is_capped_at_each_density_without_capping_other_columns() {
         assert!(widths[1] > PROVIDER_MAX_WIDTH * scale);
         let full = columns[0].text(&rows[0], 0);
         let shown = ellipsize(&full, widths[0] - CELL_HPAD * scale * 2.0, measure);
-        assert!(shown.ends_with("…)"));
+        assert!(shown.ends_with("…"));
         assert!(measure(&shown) <= widths[0] - CELL_HPAD * scale * 2.0);
         assert_eq!(
             rows[0].provider_account.as_ref().unwrap().chars().count(),
@@ -501,11 +501,11 @@ fn supplier_ellipsis_preserves_short_text_and_never_splits_unicode() {
             .map(|c| if c.is_ascii() { 1.0 } else { 2.0 })
             .sum::<f32>()
     };
-    assert_eq!(ellipsize("P(account)", 20.0, measure), "P(account)");
-    assert_eq!(ellipsize("P(中文账号🙂)", 9.0, measure), "P(中文…)");
+    assert_eq!(ellipsize("P-account", 20.0, measure), "P-account");
+    assert_eq!(ellipsize("P-中文账号🙂", 9.0, measure), "P-中文…");
     assert_eq!(ellipsize("long-provider", 6.0, measure), "long…");
     assert_eq!(ellipsize("long-provider", 1.0, measure), "");
-    assert_eq!(ellipsize("P(account)", 2.0, measure), "…");
+    assert_eq!(ellipsize("P-account", 2.0, measure), "…");
     assert_eq!(ellipsize("", 0.0, measure), "");
 }
 

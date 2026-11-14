@@ -634,20 +634,20 @@ mod tests {
     fn live_account_and_key_labels_follow_the_actual_attempt_and_clear_on_switch() {
         let mut active = vec![live_request()];
         for (kind, who, expected_account, expected_key, expected_label) in [
-            ("account", "first", Some("first"), None, "Trae CN(first)"),
+            ("account", "first", Some("first"), None, "Trae CN-first"),
             (
                 "account",
                 " second ",
                 Some("second"),
                 None,
-                "Trae CN(second)",
+                "Trae CN-second",
             ),
             (
                 "key",
                 "main-key",
                 None,
                 Some("main-key"),
-                "Trae CN(main-key)",
+                "Trae CN-main-key",
             ),
             ("provider", "not-an-account", None, None, "Trae CN"),
             ("account", " ", None, None, "Trae CN"),

@@ -60,7 +60,7 @@ fn maps_every_wire_field_the_table_renders() {
     assert_eq!(row.provider_account.as_deref(), Some("team"));
     assert_eq!(row.provider_key.as_deref(), Some("main-key"));
     assert!(row.multi_account_providers.is_empty());
-    assert_eq!(row.provider_label().as_deref(), Some("Anthropic(main-key)"));
+    assert_eq!(row.provider_label().as_deref(), Some("Anthropic-main-key"));
     assert_eq!(row.agent.as_deref(), Some("Claude Code"));
     assert_eq!(row.host.as_deref(), Some("api.anthropic.com"));
     assert_eq!(row.tries, 2);
@@ -74,17 +74,17 @@ fn maps_every_wire_field_the_table_renders() {
 }
 
 #[test]
-fn the_provider_cell_carries_the_key_name_in_parentheses() {
+fn the_provider_cell_carries_the_key_name_after_a_dash() {
     let both = Row::from_record(&record(
         r#"{"providerName":"Anthropic","providerKeyName":"k"}"#,
     ));
-    assert_eq!(both.provider_label().as_deref(), Some("Anthropic(k)"));
+    assert_eq!(both.provider_label().as_deref(), Some("Anthropic-k"));
 
     let provider_only = Row::from_record(&record(r#"{"providerName":"Anthropic"}"#));
     assert_eq!(provider_only.provider_label().as_deref(), Some("Anthropic"));
 
     let key_only = Row::from_record(&record(r#"{"providerKeyName":"k"}"#));
-    assert_eq!(key_only.provider_label().as_deref(), Some("(k)"));
+    assert_eq!(key_only.provider_label().as_deref(), Some("k"));
 
     assert_eq!(Row::from_record(&record("{}")).provider_label(), None);
 }
@@ -92,11 +92,11 @@ fn the_provider_cell_carries_the_key_name_in_parentheses() {
 #[test]
 fn multi_account_provider_shows_account_before_the_key_without_changing_identity() {
     for (account, key, expected) in [
-        (Some("team"), None, "Provider(team)"),
-        (Some("user@example.com"), Some("key"), "Provider(user@e)"),
-        (Some("  team  "), None, "Provider(team)"),
-        (Some("  "), Some("key"), "Provider(key)"),
-        (None, Some("key"), "Provider(key)"),
+        (Some("team"), None, "Provider-team"),
+        (Some("user@example.com"), Some("key"), "Provider-user@e"),
+        (Some("  team  "), None, "Provider-team"),
+        (Some("  "), Some("key"), "Provider-key"),
+        (None, Some("key"), "Provider-key"),
         (None, None, "Provider"),
     ] {
         let record = serde_json::from_value(serde_json::json!({
@@ -123,7 +123,7 @@ fn single_account_labels_are_hidden_but_keys_and_raw_accounts_remain() {
         ),
         (
             r#"{"provider":"p","providerName":"Provider","providerAccount":"only","providerKeyName":"key"}"#,
-            "Provider(key)",
+            "Provider-key",
         ),
     ] {
         let row = Row::from_record(&record(json));
@@ -151,11 +151,11 @@ fn account_visibility_uses_each_raw_supplier_identity_before_aliasing() {
     for (json, expected) in [
         (
             r#"{"provider":"multi","providerName":"Provider","providerAccount":"a"}"#,
-            "P(a)",
+            "P-a",
         ),
         (
             r#"{"provider":"multi","providerName":"Renamed","providerAccount":"b"}"#,
-            "Renamed(b)",
+            "Renamed-b",
         ),
         (
             r#"{"provider":"single","providerName":"Provider","providerAccount":"only"}"#,
@@ -163,7 +163,7 @@ fn account_visibility_uses_each_raw_supplier_identity_before_aliasing() {
         ),
         (
             r#"{"providerName":"Provider","providerAccount":"fallback"}"#,
-            "P(fallba)",
+            "P-fallba",
         ),
     ] {
         let mut raw = Row::from_record(&record(json));
@@ -181,22 +181,22 @@ fn account_visibility_uses_each_raw_supplier_identity_before_aliasing() {
     ));
     fallback.raw_provider = None;
     fallback.multi_account_providers = multi_account_providers;
-    assert_eq!(fallback.provider_label().as_deref(), Some("Provider(a)"));
+    assert_eq!(fallback.provider_label().as_deref(), Some("Provider-a"));
 }
 
 #[test]
 fn displayed_accounts_keep_six_unicode_characters_without_changing_detail_names() {
     for (account, expected) in [
-        ("", "Provider(key-label)"),
-        ("   ", "Provider(key-label)"),
-        ("abcde", "Provider(abcde)"),
-        ("abcdef", "Provider(abcdef)"),
-        ("abcdefg", "Provider(abcdef)"),
-        ("  abcdefg  ", "Provider(abcdef)"),
-        ("中文账号名称", "Provider(中文账号名称)"),
-        ("中文账号名称七", "Provider(中文账号名称)"),
-        ("甲🙂乙🙂丙🙂丁", "Provider(甲🙂乙🙂丙🙂)"),
-        ("ab(cd)ef", "Provider(ab(cd))"),
+        ("", "Provider-key-label"),
+        ("   ", "Provider-key-label"),
+        ("abcde", "Provider-abcde"),
+        ("abcdef", "Provider-abcdef"),
+        ("abcdefg", "Provider-abcdef"),
+        ("  abcdefg  ", "Provider-abcdef"),
+        ("中文账号名称", "Provider-中文账号名称"),
+        ("中文账号名称七", "Provider-中文账号名称"),
+        ("甲🙂乙🙂丙🙂丁", "Provider-甲🙂乙🙂丙🙂"),
+        ("ab(cd)ef", "Provider-ab(cd)"),
     ] {
         let mut row = Row::from_record(&record(
             r#"{"providerName":"Provider","providerKeyName":"key-label"}"#,
@@ -210,9 +210,9 @@ fn displayed_accounts_keep_six_unicode_characters_without_changing_detail_names(
         assert_eq!(
             provider_label(Some("Provider"), Some(account), Some("key-label")),
             Some(if account.trim().is_empty() {
-                "Provider(key-label)".into()
+                "Provider-key-label".into()
             } else {
-                format!("Provider({})", account.trim())
+                format!("Provider-{}", account.trim())
             })
         );
     }
@@ -230,10 +230,10 @@ fn active_accounts_use_the_same_visibility_rule_as_history() {
     assert!(row.multi_account_providers.is_empty());
     assert_eq!(row.provider_label().as_deref(), Some("Provider"));
     row.multi_account_providers = Arc::new(HashSet::from(["p".into()]));
-    assert_eq!(row.provider_label().as_deref(), Some("Provider(team)"));
+    assert_eq!(row.provider_label().as_deref(), Some("Provider-team"));
     assert_eq!(row.provider_account.as_deref(), Some("team"));
     row.provider_account = Some("team-account".into());
-    assert_eq!(row.provider_label().as_deref(), Some("Provider(team-a)"));
+    assert_eq!(row.provider_label().as_deref(), Some("Provider-team-a"));
     assert_eq!(row.provider_account.as_deref(), Some("team-account"));
 }
 
