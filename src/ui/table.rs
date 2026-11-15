@@ -32,6 +32,14 @@ const STATUS_DOT: &str = "●";
 const LATENCY_SLOW_MS: i64 = 60_000;
 const LATENCY_CRITICAL_MS: i64 = 120_000;
 
+/// Readings above this are treated as noise (tiny local models, skewed
+/// timings) and left blank rather than shown as a plausible number.
+const SPEED_MAX_TPS: f64 = 999.0;
+
+/// Readings past this are suspect; they stay visible but fade into the
+/// background so they do not read like a normal measurement.
+const SPEED_FAINT_TPS: f64 = 300.0;
+
 /// One table column: the status dot, followed by one column per visible cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Column {
@@ -95,7 +103,7 @@ impl Column {
                 DisplayField::Cache => row.cache_hit_rate().map(|rate| format!("{rate:.2}%")),
                 DisplayField::CacheWrite => (row.write_cached_tokens > 0)
                     .then(|| format!("写 {}", fmt::tokens_compact(row.write_cached_tokens))),
-                DisplayField::Speed => row.tps().map(|tps| format!("{tps:.0} tps")),
+                DisplayField::Speed => speed_text(row),
                 DisplayField::Retry => retry_text(row),
                 DisplayField::Cost => row.total_cost.map(fmt::cost),
                 DisplayField::Latency => fmt::latency(row.latency_ms, row.first_token_ms),
@@ -152,7 +160,11 @@ impl Column {
                     Some(_) => theme::GREEN,
                     None => theme::RED,
                 },
-                DisplayField::CacheWrite | DisplayField::Speed => theme::TEXT_DIM,
+                DisplayField::CacheWrite => theme::TEXT_DIM,
+                DisplayField::Speed => match row.tps() {
+                    Some(tps) if tps > SPEED_FAINT_TPS => theme::TEXT_FAINT,
+                    _ => theme::TEXT_DIM,
+                },
                 DisplayField::Retry => theme::RED,
                 DisplayField::Cost => theme::YELLOW,
                 DisplayField::Latency => latency_color(row),
@@ -189,6 +201,15 @@ fn retry_text(row: &Row) -> Option<String> {
         return Some("交".into());
     }
     (row.tries > 1).then(|| format!("{}×", row.tries - 1))
+}
+
+/// ` 50 tps`. Right-padded to three digits so the column stays aligned as
+/// readings change width. Readings past `SPEED_MAX_TPS` are dropped: they come
+/// from sub-second generations where the timing, not the model, dominates.
+fn speed_text(row: &Row) -> Option<String> {
+    row.tps()
+        .filter(|tps| *tps <= SPEED_MAX_TPS)
+        .map(|tps| format!("{tps:>3.0} tps"))
 }
 
 fn text(value: Option<&str>) -> Option<String> {

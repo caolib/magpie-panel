@@ -135,6 +135,22 @@ fn switching_a_column_off_removes_it() {
 }
 
 #[test]
+fn implausible_speeds_fade_or_disappear() {
+    let rows = [
+        row(r#"{"model":"a","out":200,"ms":5000,"ttft_ms":1000}"#),
+        row(r#"{"model":"a","out":400,"ms":1000}"#),
+        row(r#"{"model":"a","out":2000,"ms":1000}"#),
+    ];
+    let speed = Column::Field(DisplayField::Speed);
+    let v = view(&rows, &[]);
+    assert_eq!(speed.text(&rows[0], 0), " 50 tps");
+    assert_eq!(speed.text(&rows[1], 0), "400 tps");
+    assert_eq!(speed.text(&rows[2], 0), "");
+    assert_eq!(speed.color(&rows[0], &v, &[], &[]), theme::TEXT_DIM);
+    assert_eq!(speed.color(&rows[1], &v, &[], &[]), theme::TEXT_FAINT);
+}
+
+#[test]
 fn saved_column_order_keeps_the_status_dot_first() {
     let rows = [row(FULL)];
     let mut v = view(&rows, &[]);
