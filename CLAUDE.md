@@ -27,7 +27,7 @@ cargo fmt -- --check
 - 模型映射条目可选 `logo`（PNG/JPG 文件路径）与 `logoBg`（`#RRGGBB`/`#AARRGGBB`，留空为白色，`none`/`transparent`/`透明` 为透明）。图标按原始模型名匹配映射的 `from`，在显示名改写之前决定；图标完全由配置决定，没有内建默认图标。`ui/logo.rs` 缓存解码结果并按文件 mtime 重载。
 - 映射表单的 `from` 可用逗号分隔（`deepseek,ds`），仍保存为一条规则，匹配时按逗号拆开分别判断（`apply_aliases` 与 `model_logo` 都这样处理）；保存时规范化为 `a,b` 形式。「编辑」把一条回填到表单，保存替换原条目（改前缀时先删旧条目）。设置窗口的编辑框是原生 EDIT，外框由父窗口按圆角绘制，控件只占一行高度并垂直居中。
 - `accounts` 是实际轮询的连接；顶层 `endpoint` 是首次安装和新增连接表单的默认地址。环境变量 `MAGPIE_GATEWAY_KEY`（名字由 `gatewayKeyEnvVar` 改）只覆盖第一条连接，并优先于该连接保存的密钥。
-- `pollSeconds` / `activePollSeconds`（默认 5 / 2）只能改配置后重启，设置窗口没有。`period`（默认 `30d`）同样只改配置，决定 usage 窗口。
+- `pollSeconds` / `activePollSeconds`（默认 5 / 1）只能改配置后重启，设置窗口没有；无进行中请求时从 `pollSeconds` 每轮增加 1 秒，默认到 10 秒封顶（若配置值更大则不缩短）。`period`（默认 `30d`）同样只改配置，决定 usage 窗口。
 - `rowLimit` 随窗口高度重算。
 
 ## 线程与状态

@@ -134,6 +134,34 @@ fn backoff_starts_at_two_seconds_and_caps_at_thirty() {
 }
 
 #[test]
+fn idle_polling_grows_one_second_at_a_time_and_caps_at_ten() {
+    assert_eq!(
+        next_idle_interval(Duration::ZERO, 5),
+        Duration::from_secs(5)
+    );
+    assert_eq!(
+        next_idle_interval(Duration::from_secs(5), 5),
+        Duration::from_secs(6)
+    );
+    assert_eq!(
+        next_idle_interval(Duration::from_secs(9), 5),
+        Duration::from_secs(10)
+    );
+    assert_eq!(
+        next_idle_interval(Duration::from_secs(10), 5),
+        Duration::from_secs(10)
+    );
+    assert_eq!(
+        next_idle_interval(Duration::ZERO, 12),
+        Duration::from_secs(12)
+    );
+    assert_eq!(
+        next_idle_interval(Duration::from_secs(12), 12),
+        Duration::from_secs(12)
+    );
+}
+
+#[test]
 fn a_row_limit_command_is_adopted_and_forces_a_poll() {
     let mut config = Config::default();
     let mut targets = Vec::new();

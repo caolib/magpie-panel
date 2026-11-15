@@ -191,6 +191,15 @@ fn next_backoff(previous: Duration) -> Duration {
     }
 }
 
+fn next_idle_interval(previous: Duration, initial_seconds: u64) -> Duration {
+    let initial = initial_seconds.max(1);
+    if previous.is_zero() {
+        Duration::from_secs(initial)
+    } else {
+        Duration::from_secs((previous.as_secs() + 1).min(initial.max(10)))
+    }
+}
+
 /// Rows to ask the gateway for: enough to filter locally, never past the cap.
 fn fetch_limit(row_limit: i64) -> i64 {
     (row_limit.max(1) * 8).clamp(MIN_FETCH, MAX_FETCH)
@@ -345,6 +354,7 @@ fn run(
     let mut detail_busy = false;
 
     let mut backoff = Duration::ZERO;
+    let mut idle_interval = Duration::ZERO;
     let mut force = true;
     let mut pending_probe: Option<String> = None;
     let mut details = DetailQueue::default();
@@ -487,14 +497,14 @@ fn run(
             }
 
             let interval = if !backoff.is_zero() {
+                idle_interval = Duration::ZERO;
                 backoff
+            } else if any_active {
+                idle_interval = Duration::ZERO;
+                Duration::from_secs(config.active_poll_seconds.max(1))
             } else {
-                let secs = if any_active {
-                    config.active_poll_seconds
-                } else {
-                    config.poll_seconds
-                };
-                Duration::from_secs(secs.max(1))
+                idle_interval = next_idle_interval(idle_interval, config.poll_seconds);
+                idle_interval
             };
             next_poll = Instant::now() + interval;
         }

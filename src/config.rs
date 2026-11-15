@@ -154,7 +154,7 @@ impl Default for Config {
         Config {
             endpoint: DEFAULT_ENDPOINT.into(),
             poll_seconds: 5,
-            active_poll_seconds: 2,
+            active_poll_seconds: 1,
             row_limit: DEFAULT_ROWS as i64,
             period: "30d".into(),
             gateway_key_env_var: "MAGPIE_GATEWAY_KEY".into(),
