@@ -871,6 +871,17 @@ impl Row {
         Some((self.cached_tokens as f64 / prompt as f64 * 100.0).min(100.0))
     }
 
+    /// Hit rate in hundredths of a percent, truncated instead of rounded so a
+    /// displayed value never overstates the cache share.
+    pub fn cache_hit_hundredths(&self) -> Option<(i64, i64)> {
+        let prompt = self.prompt_total();
+        if self.cached_tokens <= 0 || prompt <= 0 {
+            return None;
+        }
+        let hundredths = (self.cached_tokens * 10_000 / prompt).min(10_000);
+        Some((hundredths / 100, hundredths % 100))
+    }
+
     /// Flags a weak hit rate only for sizeable prompts.
     pub fn cache_hit_is_low(&self) -> bool {
         matches!(self.cache_hit_rate(), Some(r) if r < 80.0 && self.prompt_total() >= 40_000)

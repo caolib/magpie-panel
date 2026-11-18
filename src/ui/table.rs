@@ -100,7 +100,9 @@ impl Column {
                 }
                 // Errors stay compact even if the failed attempt used cache.
                 DisplayField::Cache if error_code(row).is_some() => error_code(row),
-                DisplayField::Cache => row.cache_hit_rate().map(|rate| format!("{rate:.2}%")),
+                DisplayField::Cache => row
+                    .cache_hit_hundredths()
+                    .map(|(whole, frac)| format!("{whole}.{frac:02}%")),
                 DisplayField::CacheWrite => (row.write_cached_tokens > 0)
                     .then(|| format!("写 {}", fmt::tokens_compact(row.write_cached_tokens))),
                 DisplayField::Speed => speed_text(row),

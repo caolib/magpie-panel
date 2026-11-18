@@ -365,13 +365,19 @@ fn throughput_excludes_prompt_processing() {
 fn cache_rate_needs_a_cached_read_and_says_when_it_is_weak() {
     let row = Row::from_record(&record(FULL));
     assert!((row.cache_hit_rate().unwrap() - 4000.0 / 5500.0 * 100.0).abs() < 1e-9);
+    assert_eq!(row.cache_hit_hundredths(), Some((72, 72)));
     assert!(!row.cache_hit_is_low());
+
+    // Truncated, not rounded: 66.666…% shows as 66.66%.
+    let two_thirds = Row::from_record(&record(r#"{"in":1,"cache_read":2}"#));
+    assert_eq!(two_thirds.cache_hit_hundredths(), Some((66, 66)));
 
     let weak = Row::from_record(&record(r#"{"in":50000,"cache_read":1000}"#));
     assert!(weak.cache_hit_is_low());
 
     let uncached = Row::from_record(&record(r#"{"in":1000}"#));
     assert!(uncached.cache_hit_rate().is_none());
+    assert!(uncached.cache_hit_hundredths().is_none());
 }
 
 #[test]
