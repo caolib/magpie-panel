@@ -106,11 +106,11 @@ fn live_first_survives_restart_and_show_all_fields() {
 }
 
 #[test]
-fn group_by_model_defaults_off_without_changing_existing_config() {
-    assert!(!Config::default().group_by_model);
+fn auto_group_defaults_off_without_changing_existing_config() {
+    assert!(!Config::default().auto_group);
     for json in ["{}", r#"{"hiddenFields":[],"rowLimit":5,"liveFirst":true}"#] {
         let config: Config = serde_json::from_str(json).unwrap();
-        assert!(!config.group_by_model);
+        assert!(!config.auto_group);
     }
     let existing: Config =
         serde_json::from_str(r#"{"hiddenFields":[],"rowLimit":5,"liveFirst":true,"opacity":73}"#)
@@ -122,24 +122,43 @@ fn group_by_model_defaults_off_without_changing_existing_config() {
 }
 
 #[test]
-fn group_by_model_round_trips_and_show_all_keeps_both_sort_switches() {
-    for group_by_model in [false, true] {
+fn auto_group_migrates_the_previous_model_grouping_switch() {
+    for enabled in [false, true] {
+        let json =
+            format!(r#"{{"groupByModel":{enabled},"liveFirst":true,"rowLimit":5,"opacity":73}}"#);
+        let config: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(config.auto_group, enabled);
+        assert!(config.live_first);
+        assert_eq!(config.row_limit, 5);
+        assert_eq!(config.opacity, 73);
+        let saved = serde_json::to_value(&config).unwrap();
+        assert_eq!(saved["autoGroup"], enabled);
+        assert!(saved.get("groupByModel").is_none());
+        let restored: Config = serde_json::from_value(saved).unwrap();
+        assert_eq!(restored.auto_group, enabled);
+    }
+}
+
+#[test]
+fn auto_group_round_trips_and_show_all_keeps_both_sort_switches() {
+    for auto_group in [false, true] {
         for live_first in [false, true] {
             let mut config = Config {
-                group_by_model,
+                auto_group,
                 live_first,
                 ..Config::default()
             };
             config.show_all_fields();
             assert!(config.hidden_fields.is_empty());
-            assert_eq!(config.group_by_model, group_by_model);
+            assert_eq!(config.auto_group, auto_group);
             assert_eq!(config.live_first, live_first);
             let json = serde_json::to_value(&config).unwrap();
-            assert_eq!(json["groupByModel"], group_by_model);
+            assert_eq!(json["autoGroup"], auto_group);
+            assert!(json.get("groupByModel").is_none());
             assert_eq!(json["liveFirst"], live_first);
-            assert!(json.get("group_by_model").is_none());
+            assert!(json.get("auto_group").is_none());
             let back: Config = serde_json::from_value(json).unwrap();
-            assert_eq!(back.group_by_model, group_by_model);
+            assert_eq!(back.auto_group, auto_group);
             assert_eq!(back.live_first, live_first);
         }
     }

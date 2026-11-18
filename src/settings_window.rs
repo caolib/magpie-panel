@@ -912,9 +912,9 @@ fn dispatch(hwnd: HWND, action: Action) {
                 s.app.save();
             });
         }
-        Action::GroupByModel => {
+        Action::AutoGroup => {
             PanelState::with(|s| {
-                s.app.config.group_by_model = !s.app.config.group_by_model;
+                s.app.config.auto_group = !s.app.config.auto_group;
                 s.app.rebuild();
                 s.app.save();
             });

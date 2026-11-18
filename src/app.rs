@@ -193,7 +193,7 @@ impl App {
     }
 
     /// Select the newest filtered rows, optionally prioritizing live requests.
-    /// Model grouping only reorders finished rows within that selected page.
+    /// Automatic grouping only reorders finished rows within that selected page.
     pub fn rebuild(&mut self) {
         // When trace has no display name, resolve provider ids from the newest
         // named usage row on the same connection, before filtering.
@@ -255,8 +255,8 @@ impl App {
             std::cmp::Reverse((self.config.live_first && row.live, row.age_key()))
         });
         rows.truncate(self.config.row_limit.max(1) as usize);
-        if self.config.group_by_model {
-            group_model_rows(&mut rows);
+        if self.config.auto_group {
+            auto_group_rows(&mut rows);
         }
         self.rows = rows;
         if self.selected.is_some_and(|sel| sel >= self.rows.len()) {
@@ -326,7 +326,7 @@ impl App {
 
 /// Input is newest first. First-encounter group ranks retain that priority;
 /// only finished-row slots move, so live rows keep their original positions.
-fn group_model_rows(rows: &mut [Row]) {
+fn auto_group_rows(rows: &mut [Row]) {
     let slots: Vec<_> = rows
         .iter()
         .enumerate()
@@ -339,7 +339,9 @@ fn group_model_rows(rows: &mut [Row]) {
             .enumerate()
             .map(|(source, &slot)| {
                 let next = groups.len();
-                let rank = *groups.entry(rows[slot].model_key()).or_insert(next);
+                let row = &rows[slot];
+                let key = (row.model_key(), row.provider.as_deref());
+                let rank = *groups.entry(key).or_insert(next);
                 (source, rank)
             })
             .collect();

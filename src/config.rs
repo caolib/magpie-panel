@@ -67,8 +67,9 @@ pub struct Config {
     pub field_order: Vec<DisplayField>,
     /// Put live requests before finished ones, keeping newest first in each group.
     pub live_first: bool,
-    /// Group displayed finished rows by model and effort, leaving live slots unchanged.
-    pub group_by_model: bool,
+    /// Group displayed finished rows by model, effort and provider, leaving live slots unchanged.
+    #[serde(alias = "groupByModel")]
+    pub auto_group: bool,
     pub window: WindowState,
 }
 
@@ -175,7 +176,7 @@ impl Default for Config {
             hidden_fields: DEFAULT_HIDDEN_FIELDS.to_vec(),
             field_order: DisplayField::ALL.to_vec(),
             live_first: false,
-            group_by_model: false,
+            auto_group: false,
             window: WindowState::default(),
         }
     }

@@ -180,10 +180,10 @@ fn the_fields_tab_offers_a_separate_live_first_checkbox() {
 }
 
 #[test]
-fn the_fields_tab_offers_a_separate_model_grouping_checkbox() {
+fn the_fields_tab_offers_a_separate_auto_grouping_checkbox() {
     let mut app = app();
     for enabled in [false, true] {
-        app.config.group_by_model = enabled;
+        app.config.auto_group = enabled;
         for (width, height) in [(WIDTH, HEIGHT), (MIN_WIDTH, MIN_HEIGHT)] {
             let mut state = State {
                 tab: Tab::Fields,
@@ -193,14 +193,11 @@ fn the_fields_tab_offers_a_separate_model_grouping_checkbox() {
             let toggle = l
                 .controls
                 .iter()
-                .find(|c| c.action == Action::GroupByModel)
-                .expect("model grouping checkbox");
+                .find(|c| c.action == Action::AutoGroup)
+                .expect("auto grouping checkbox");
             assert!(toggle.body && toggle.check && !toggle.danger);
             assert_eq!(toggle.selected, enabled);
-            assert_eq!(
-                toggle.label.trim_start_matches(['☑', '☐', ' ']),
-                "按模型分组"
-            );
+            assert_eq!(toggle.label.trim_start_matches(['☑', '☐', ' ']), "自动分组");
             let show_all = l
                 .controls
                 .iter()
@@ -217,11 +214,11 @@ fn the_fields_tab_offers_a_separate_model_grouping_checkbox() {
             let rect = l.screen_rect(toggle, state.scroll);
             assert_eq!(
                 l.hit(&state, rect.x + 2.0, rect.y + 2.0),
-                Some(Action::GroupByModel)
+                Some(Action::AutoGroup)
             );
             state.focus = Some(Action::LiveFirst);
             l.focus_next(&mut state, false);
-            assert_eq!(state.focus, Some(Action::GroupByModel));
+            assert_eq!(state.focus, Some(Action::AutoGroup));
             l.focus_next(&mut state, false);
             assert_eq!(state.focus, Some(Action::ResetFieldOrder));
             l.focus_next(&mut state, false);
@@ -229,7 +226,7 @@ fn the_fields_tab_offers_a_separate_model_grouping_checkbox() {
             l.focus_next(&mut state, true);
             assert_eq!(state.focus, Some(Action::ResetFieldOrder));
             l.focus_next(&mut state, true);
-            assert_eq!(state.focus, Some(Action::GroupByModel));
+            assert_eq!(state.focus, Some(Action::AutoGroup));
             assert!(l.max_scroll() > 0.0);
             let body: Vec<_> = l.controls.iter().filter(|c| c.body).collect();
             for (i, control) in body.iter().enumerate() {
@@ -262,7 +259,7 @@ fn the_fields_tab_offers_a_separate_model_grouping_checkbox() {
             ..State::default()
         };
         let l = Layout::new(&app, &state, WIDTH, HEIGHT);
-        assert!(l.controls.iter().all(|c| c.action != Action::GroupByModel));
+        assert!(l.controls.iter().all(|c| c.action != Action::AutoGroup));
     }
 }
 
@@ -385,7 +382,7 @@ fn fields_keyboard_navigation_follows_order_skips_endpoints_and_scrolls_rows_int
     let mut actions = vec![
         Action::ShowAllFields,
         Action::LiveFirst,
-        Action::GroupByModel,
+        Action::AutoGroup,
         Action::ResetFieldOrder,
     ];
     for (index, field) in fields.iter().copied().enumerate() {

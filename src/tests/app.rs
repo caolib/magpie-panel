@@ -271,7 +271,7 @@ fn model_grouping_defaults_off_and_can_restore_chronological_order() {
             ["A-new", "B-new", "A-old", "C-new", "B-old", "C-old"],
         ),
     ] {
-        app.config.group_by_model = enabled;
+        app.config.auto_group = enabled;
         app.rebuild();
         assert_eq!(
             app.rows
@@ -290,7 +290,7 @@ fn grouping_only_reorders_the_records_already_selected_by_the_row_limit() {
     app.rebuild();
     let mut selected: Vec<_> = app.rows.iter().map(|r| r.id.clone()).collect();
     selected.sort();
-    app.config.group_by_model = true;
+    app.config.auto_group = true;
     app.rebuild();
     let mut grouped: Vec<_> = app.rows.iter().map(|r| r.id.clone()).collect();
     grouped.sort();
@@ -320,7 +320,7 @@ fn grouping_never_moves_or_groups_live_rows_with_either_live_first_setting() {
     let mut app = app_with(fixture);
     for live_first in [false, true] {
         app.config.live_first = live_first;
-        app.config.group_by_model = false;
+        app.config.auto_group = false;
         app.rebuild();
         let live_slots: Vec<_> = app
             .rows
@@ -329,7 +329,7 @@ fn grouping_never_moves_or_groups_live_rows_with_either_live_first_setting() {
             .filter(|(_, r)| r.live)
             .map(|(i, r)| (i, r.id.clone()))
             .collect();
-        app.config.group_by_model = true;
+        app.config.auto_group = true;
         app.rebuild();
         for (index, id) in live_slots {
             assert_eq!(app.rows[index].id, id);
@@ -352,7 +352,7 @@ fn grouping_never_moves_or_groups_live_rows_with_either_live_first_setting() {
 }
 
 #[test]
-fn grouping_uses_display_model_and_effort_across_providers_and_connections() {
+fn grouping_uses_display_model_effort_and_provider_across_connections() {
     let mut app = app_with(vec![
         row(
             r#"{"t":"2026-10-20T09:00:05Z","model":"long-A","effort":"high","provider":"p1"}"#,
@@ -378,7 +378,12 @@ fn grouping_uses_display_model_and_effort_across_providers_and_connections() {
         logo: String::new(),
         logo_bg: String::new(),
     });
-    app.config.group_by_model = true;
+    app.config.provider_aliases.push(NameAlias {
+        from: "p2".into(),
+        to: "p1".into(),
+        ..NameAlias::default()
+    });
+    app.config.auto_group = true;
     app.rebuild();
     assert_eq!(
         app.rows
@@ -390,7 +395,68 @@ fn grouping_uses_display_model_and_effort_across_providers_and_connections() {
     assert_eq!(app.rows[0].display_model(), app.rows[1].display_model());
     assert_eq!(app.rows[0].model_key(), app.rows[1].model_key());
     assert_ne!(app.rows[0].account_id, app.rows[1].account_id);
-    assert_ne!(app.rows[0].provider, app.rows[1].provider);
+    assert_eq!(app.rows[0].provider, app.rows[1].provider);
+    assert_ne!(app.rows[0].provider_id, app.rows[1].provider_id);
+}
+
+#[test]
+fn auto_group_separates_providers_and_unknowns_without_splitting_accounts_or_keys() {
+    let fixture = [
+        ("A", Some("p1"), "a1", "A-p1-new"),
+        ("A", Some("p2"), "a1", "A-p2-new"),
+        ("A", None, "a1", "unknown-new"),
+        ("B", Some("p1"), "a1", "B-p1-new"),
+        ("A", Some("p1"), "a2", "A-p1-old"),
+        ("A", Some("p2"), "a2", "A-p2-old"),
+        ("A", None, "a2", "unknown-old"),
+        ("B", Some("p1"), "a2", "B-p1-old"),
+        ("A", Some("p3"), "a1", "A-p3"),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, (model, provider, account, agent))| {
+        row(
+            &serde_json::json!({
+                "t": format!("2026-10-20T09:00:0{}Z", 9 - index),
+                "model": model,
+                "provider": provider,
+                "providerAccount": format!("account-{index}"),
+                "providerKeyName": format!("key-{index}"),
+                "agent": agent,
+            })
+            .to_string(),
+            account,
+        )
+    })
+    .collect();
+    let mut app = app_with(fixture);
+    let identities: Vec<_> = app.raw_rows().iter().map(Row::detail_identity).collect();
+    app.config.auto_group = true;
+    app.rebuild();
+    assert_eq!(
+        app.rows
+            .iter()
+            .map(|row| row.agent.as_deref().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "A-p1-new",
+            "A-p1-old",
+            "A-p2-new",
+            "A-p2-old",
+            "unknown-new",
+            "unknown-old",
+            "B-p1-new",
+            "B-p1-old",
+            "A-p3",
+        ]
+    );
+    assert_eq!(
+        app.raw_rows()
+            .iter()
+            .map(Row::detail_identity)
+            .collect::<Vec<_>>(),
+        identities
+    );
 }
 
 #[test]
@@ -399,7 +465,7 @@ fn grouping_respects_search_status_and_provider_filters_before_grouping() {
     fixture[0].provider_id = Some("hidden".into());
     fixture[2].status = Status::Failed;
     let mut app = app_with(fixture);
-    app.config.group_by_model = true;
+    app.config.auto_group = true;
     app.config.hidden_providers.push(HiddenProvider {
         account_id: "a1".into(),
         provider: "hidden".into(),
@@ -439,7 +505,7 @@ fn a_finished_request_joins_its_model_group_on_the_next_snapshot() {
         row(r#"{"t":"2026-10-20T09:00:05Z","model":"B"}"#, "a1"),
         live_row(r#"{"started":"2026-10-20T09:00:04Z","model":"A"}"#, "a1"),
     ]);
-    app.config.group_by_model = true;
+    app.config.auto_group = true;
     app.rebuild();
     assert_eq!(
         app.rows
@@ -466,43 +532,56 @@ fn a_finished_request_joins_its_model_group_on_the_next_snapshot() {
 }
 
 #[test]
-fn model_group_permutations_keep_stable_order_and_live_slots() {
+fn auto_group_permutations_keep_stable_order_and_live_slots() {
     // Exhaustive small inputs exercise both permutation directions and empty/single groups.
+    let categories = [
+        ("A", Some("p1")),
+        ("A", Some("p2")),
+        ("B", Some("p1")),
+        ("A", None),
+        ("live", Some("p1")),
+    ];
     for length in 0..=5 {
-        for pattern in 0..3usize.pow(length) {
+        for pattern in 0..categories.len().pow(length) {
             let mut digits = pattern;
             let original: Vec<_> = (0..length)
                 .map(|index| {
-                    let category = digits % 3;
-                    digits /= 3;
-                    let model = ["A", "B", "live"][category];
-                    if category == 2 {
+                    let category = digits % categories.len();
+                    digits /= categories.len();
+                    let (model, provider) = categories[category];
+                    if model == "live" {
                         live_row(&format!(r#"{{"route":{index},"model":"{model}"}}"#), "a1")
                     } else {
                         row(
-                            &format!(r#"{{"model":"{model}","session":"{index}"}}"#),
+                            &serde_json::json!({
+                                "model": model,
+                                "provider": provider,
+                                "session": index.to_string(),
+                            })
+                            .to_string(),
                             "a1",
                         )
                     }
                 })
                 .collect();
             let mut expected = Vec::new();
-            let mut names = Vec::new();
+            let mut keys = Vec::new();
             for row in original.iter().filter(|r| !r.live) {
-                if !names.contains(&row.model.as_str()) {
-                    names.push(row.model.as_str());
+                let key = (row.model_key(), row.provider.as_deref());
+                if !keys.contains(&key) {
+                    keys.push(key);
                 }
             }
-            for model in names {
+            for key in keys {
                 expected.extend(
                     original
                         .iter()
-                        .filter(|r| !r.live && r.model == model)
+                        .filter(|r| !r.live && (r.model_key(), r.provider.as_deref()) == key)
                         .map(|r| r.id.clone()),
                 );
             }
             let mut grouped = original.clone();
-            group_model_rows(&mut grouped);
+            auto_group_rows(&mut grouped);
             assert_eq!(
                 grouped
                     .iter()

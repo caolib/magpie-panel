@@ -36,7 +36,7 @@ pub enum Action {
     ResetFieldOrder,
     ShowAllFields,
     LiveFirst,
-    GroupByModel,
+    AutoGroup,
     /// The opacity cell, covered by a native edit box that types the number.
     OpacityInput,
     /// Apply what the opacity box holds; unparsable input reverts.
@@ -399,9 +399,9 @@ impl Layout {
                 w: self.width - 208.0,
                 h: 30.0,
             },
-            "按模型分组",
-            Action::GroupByModel,
-            app.config.group_by_model,
+            "自动分组",
+            Action::AutoGroup,
+            app.config.auto_group,
         );
         self.button(
             Rect {
