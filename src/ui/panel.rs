@@ -339,7 +339,7 @@ fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
     let inner_w = (box_.w - pad * 2.0).max(0.0);
     let placeholder = v.query_draft.is_empty() && !v.query_editing;
     let visible = if placeholder {
-        "模型 / 应用"
+        "模型 / 供应商 / 账号…"
     } else {
         fitting_tail(p, &fonts.small, v.query_draft, inner_w)
     };
