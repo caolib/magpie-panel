@@ -37,6 +37,7 @@ pub enum Action {
     ShowAllFields,
     LiveFirst,
     AutoGroup,
+    FableInputAlert,
     /// The opacity cell, covered by a native edit box that types the number.
     OpacityInput,
     /// Apply what the opacity box holds; unparsable input reverts.
@@ -416,8 +417,19 @@ impl Layout {
             false,
             true,
         );
+        self.checkbox(
+            Rect {
+                x: 24.0,
+                y: 134.0,
+                w: self.width - 48.0,
+                h: 30.0,
+            },
+            "Fable 输入超过 4 时模型名标红",
+            Action::FableInputAlert,
+            app.config.fable_input_alert,
+        );
         let fields = app.config.ordered_fields();
-        let mut y = 144.0;
+        let mut y = 180.0;
         for (index, field) in fields.iter().copied().enumerate() {
             self.checkbox(
                 Rect {

@@ -919,6 +919,13 @@ fn dispatch(hwnd: HWND, action: Action) {
                 s.app.save();
             });
         }
+        Action::FableInputAlert => {
+            PanelState::with(|s| {
+                s.app.config.fable_input_alert = !s.app.config.fable_input_alert;
+                s.app.rebuild();
+                s.app.save();
+            });
+        }
         Action::NameColorTheme(theme) => {
             PanelState::with(|s| {
                 s.app.config.name_color_theme = theme;

@@ -101,6 +101,9 @@ pub struct UsagePage {
     pub total: Option<i64>,
 }
 
+/// Uncached input (`in`) above this on a Fable row turns its model name red.
+const FABLE_INPUT_ALERT: i64 = 4;
+
 /// One line of `usage.jsonl`, as the HTTP API reports it.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct UsageRecord {
@@ -638,6 +641,9 @@ pub struct Row {
     pub session: Option<String>,
     /// Input tokens, excluding cache reads and writes.
     pub prompt_tokens: i64,
+    /// A Fable request whose uncached input is above `FABLE_INPUT_ALERT`.
+    /// Decided on the raw model name, so display aliases cannot hide it.
+    pub fable_input_high: bool,
     pub cached_tokens: i64,
     pub write_cached_tokens: i64,
     /// Output tokens, reasoning included.
@@ -676,6 +682,7 @@ impl Row {
         let mut row = self.clone();
         // Resolved against the raw name, before any mapping rewrites it.
         row.logo = config.model_logo(&row.model);
+        row.fable_input_high &= config.fable_input_alert;
         if !config.model_aliases.is_empty() {
             row.requested_model = display_model_name(&row.requested_model, &config.model_aliases);
             row.model = display_model_name(&row.model, &config.model_aliases);
@@ -733,6 +740,9 @@ impl Row {
             .or_else(|| non_empty(record.model.as_deref()))
             .unwrap_or_default();
         let model = non_empty(record.model.as_deref()).unwrap_or_default();
+        let prompt_tokens = record.input.unwrap_or(0).max(0);
+        let fable_input_high =
+            model.to_ascii_lowercase().contains("fable") && prompt_tokens > FABLE_INPUT_ALERT;
         let id = row_key(
             record.t.as_deref(),
             record.agent.as_deref(),
@@ -775,7 +785,8 @@ impl Row {
             route_id: record.route_id,
             rid: non_empty(record.rid.as_deref()),
             session: non_empty(record.session.as_deref()),
-            prompt_tokens: record.input.unwrap_or(0).max(0),
+            prompt_tokens,
+            fable_input_high,
             cached_tokens: record.cache_read.unwrap_or(0).max(0),
             write_cached_tokens: record.cache_write.unwrap_or(0).max(0),
             completion_tokens: record.out.unwrap_or(0).max(0),
@@ -833,6 +844,7 @@ impl Row {
             rid: None,
             session: non_empty(active.session.as_deref()),
             prompt_tokens: 0,
+            fable_input_high: false,
             cached_tokens: 0,
             write_cached_tokens: 0,
             completion_tokens: 0,

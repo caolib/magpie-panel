@@ -142,6 +142,7 @@ impl Column {
         match self {
             Column::Status => theme::status_color(row.status),
             Column::Field(field) => match field {
+                DisplayField::Model if row.fable_input_high => theme::RED,
                 DisplayField::Model => models
                     .iter()
                     .find(|(key, _)| *key == panel::model_color_key(row))

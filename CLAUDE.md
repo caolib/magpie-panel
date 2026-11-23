@@ -29,6 +29,7 @@ cargo fmt -- --check
 - `accounts` 是实际轮询的连接；顶层 `endpoint` 是首次安装和新增连接表单的默认地址。环境变量 `MAGPIE_GATEWAY_KEY`（名字由 `gatewayKeyEnvVar` 改）只覆盖第一条连接，并优先于该连接保存的密钥。
 - `pollSeconds` / `activePollSeconds`（默认 5 / 1）只能改配置后重启，设置窗口没有；无进行中请求时从 `pollSeconds` 每轮增加 1 秒，默认到 10 秒封顶（若配置值更大则不缩短）。`period`（默认 `30d`）同样只改配置，决定 usage 窗口。
 - `rowLimit` 随窗口高度重算。
+- `fableInputAlert`（默认开，设置窗口「属性显示」页可关）：原始模型名含 `fable` 且 `in` > 4 时模型名标红。判定在 `Row::from_record` 用原始名完成，`for_display` 只按开关屏蔽。
 
 ## 线程与状态
 

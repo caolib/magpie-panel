@@ -386,6 +386,43 @@ fn a_low_cache_rate_is_red_and_a_healthy_one_green() {
 }
 
 #[test]
+fn a_fable_row_with_uncached_input_above_four_has_a_red_model_name() {
+    let rows = [
+        row(r#"{"model":"claude-fable-5-2","in":5}"#),
+        row(r#"{"model":"any/Claude-Fable-5-2","in":5000,"cache_read":9}"#),
+        row(r#"{"model":"claude-fable-5-2","in":4,"cache_read":90000}"#),
+        row(r#"{"model":"claude-sonnet-4","in":5000}"#),
+    ];
+    let v = view(&rows, &[]);
+    let color = |row: &Row| Column::Field(DisplayField::Model).color(row, &v, &[], &[]);
+    assert_eq!(color(&rows[0]), theme::RED);
+    assert_eq!(color(&rows[1]), theme::RED);
+    assert_eq!(color(&rows[2]), theme::TEXT);
+    assert_eq!(color(&rows[3]), theme::TEXT);
+
+    // Decided on the raw name: a display alias cannot hide the alert.
+    let config = crate::config::Config {
+        model_aliases: vec![crate::config::NameAlias {
+            from: "claude-fable".into(),
+            to: "F".into(),
+            logo: String::new(),
+            logo_bg: String::new(),
+        }],
+        ..Default::default()
+    };
+    let shown = rows[0].for_display(&config);
+    assert!(!shown.model.to_lowercase().contains("fable"));
+    assert_eq!(color(&shown), theme::RED);
+
+    // Switched off in settings, the name keeps its ordinary colour.
+    let off = crate::config::Config {
+        fable_input_alert: false,
+        ..Default::default()
+    };
+    assert_eq!(color(&rows[0].for_display(&off)), theme::TEXT);
+}
+
+#[test]
 fn a_provider_keeps_the_colour_the_palette_gave_it() {
     let rows = vec![
         row(r#"{"model":"a","provider":"openai"}"#),

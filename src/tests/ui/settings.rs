@@ -123,7 +123,7 @@ fn the_fields_tab_lists_all_columns_in_normalized_order_including_hidden_ones() 
             assert!(checkbox.body && checkbox.check);
             assert_eq!(checkbox.selected, app.config.shows(*field));
             assert_eq!(checkbox.rect.x, 24.0);
-            assert_eq!(checkbox.rect.y, 144.0 + index as f32 * 36.0);
+            assert_eq!(checkbox.rect.y, 180.0 + index as f32 * 36.0);
             for offset in [-1, 1] {
                 let button = l
                     .controls
@@ -222,7 +222,11 @@ fn the_fields_tab_offers_a_separate_auto_grouping_checkbox() {
             l.focus_next(&mut state, false);
             assert_eq!(state.focus, Some(Action::ResetFieldOrder));
             l.focus_next(&mut state, false);
+            assert_eq!(state.focus, Some(Action::FableInputAlert));
+            l.focus_next(&mut state, false);
             assert_eq!(state.focus, Some(Action::Field(DisplayField::Model)));
+            l.focus_next(&mut state, true);
+            assert_eq!(state.focus, Some(Action::FableInputAlert));
             l.focus_next(&mut state, true);
             assert_eq!(state.focus, Some(Action::ResetFieldOrder));
             l.focus_next(&mut state, true);
@@ -384,6 +388,7 @@ fn fields_keyboard_navigation_follows_order_skips_endpoints_and_scrolls_rows_int
         Action::LiveFirst,
         Action::AutoGroup,
         Action::ResetFieldOrder,
+        Action::FableInputAlert,
     ];
     for (index, field) in fields.iter().copied().enumerate() {
         actions.push(Action::Field(field));
@@ -1107,4 +1112,32 @@ fn the_font_search_box_filters_installed_faces() {
     assert_eq!(state.font_matches, vec![1]);
     state.set_font_query("".into());
     assert_eq!(state.font_matches.len(), 2);
+}
+
+#[test]
+fn the_fields_tab_offers_the_fable_input_alert_checkbox() {
+    let mut app = app();
+    for enabled in [true, false] {
+        app.config.fable_input_alert = enabled;
+        for (width, height) in [(WIDTH, HEIGHT), (MIN_WIDTH, MIN_HEIGHT)] {
+            let state = State {
+                tab: Tab::Fields,
+                ..State::default()
+            };
+            let l = Layout::new(&app, &state, width, height);
+            let toggle = l
+                .controls
+                .iter()
+                .find(|c| c.action == Action::FableInputAlert)
+                .expect("fable input alert checkbox");
+            assert!(toggle.body && toggle.check && !toggle.danger);
+            assert_eq!(toggle.selected, enabled);
+            assert!(toggle.rect.x >= 24.0 && toggle.rect.x + toggle.rect.w <= width - 24.0);
+            let rect = l.screen_rect(toggle, state.scroll);
+            assert_eq!(
+                l.hit(&state, rect.x + 2.0, rect.y + 2.0),
+                Some(Action::FableInputAlert)
+            );
+        }
+    }
 }

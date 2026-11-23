@@ -70,6 +70,9 @@ pub struct Config {
     /// Group displayed finished rows by model, effort and provider, leaving live slots unchanged.
     #[serde(alias = "groupByModel")]
     pub auto_group: bool,
+    /// Paint a Fable row's model name red when its uncached input (`in`) is
+    /// above the alert threshold.
+    pub fable_input_alert: bool,
     pub window: WindowState,
 }
 
@@ -177,6 +180,7 @@ impl Default for Config {
             field_order: DisplayField::ALL.to_vec(),
             live_first: false,
             auto_group: false,
+            fable_input_alert: true,
             window: WindowState::default(),
         }
     }

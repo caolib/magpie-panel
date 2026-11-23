@@ -730,3 +730,19 @@ fn logical_window_sizes_scale_with_the_monitor() {
     assert_eq!(min_w, 640);
     assert_eq!(min_h, 160);
 }
+
+#[test]
+fn the_fable_input_alert_defaults_on_and_remembers_being_switched_off() {
+    assert!(Config::default().fable_input_alert);
+    let existing: Config = serde_json::from_str(r#"{"rowLimit":5}"#).unwrap();
+    assert!(existing.fable_input_alert);
+
+    let off = Config {
+        fable_input_alert: false,
+        ..Config::default()
+    };
+    let json = serde_json::to_value(&off).unwrap();
+    assert_eq!(json["fableInputAlert"], false);
+    let back: Config = serde_json::from_value(json).unwrap();
+    assert!(!back.fable_input_alert);
+}
