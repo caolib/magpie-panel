@@ -157,6 +157,7 @@ impl Column {
                     .unwrap_or(theme::CYAN),
                 DisplayField::ProviderKey => theme::TEXT_FAINT,
                 DisplayField::Tokens => theme::TEXT_DIM,
+                DisplayField::Cache if is_cancelled(row) => theme::TEXT_FAINT,
                 DisplayField::Cache if error_code(row).is_some() => theme::RED,
                 DisplayField::Cache => match row.cache_hit_rate() {
                     Some(_) if row.cache_hit_is_low() => theme::RED,
@@ -173,6 +174,7 @@ impl Column {
                 DisplayField::Latency => latency_color(row),
                 DisplayField::Completion => theme::TEXT_DIM,
                 DisplayField::Source => theme::TEXT_FAINT,
+                DisplayField::Error if is_cancelled(row) => theme::TEXT_FAINT,
                 DisplayField::Error => theme::RED,
                 DisplayField::Account => panel::account_color(v.accounts, &row.account_id),
                 DisplayField::CreatedAt => theme::TEXT_FAINT,
@@ -256,13 +258,29 @@ fn source_text(row: &Row) -> Option<String> {
     }
 }
 
+/// The gateway reports a client hang-up as 499. Nothing failed upstream, so it
+/// is spelled out rather than shown as an error code.
+const CANCELLED_CODE: i64 = 499;
+const CANCELLED_LABEL: &str = "取消";
+
 /// Error messages belong in the popup; only the code affects table width.
 fn error_code(row: &Row) -> Option<String> {
     row.status_code
         .filter(|code| {
             (100..600).contains(code) && (row.status == model::Status::Failed || row.live)
         })
-        .map(|code| code.to_string())
+        .map(|code| {
+            if code == CANCELLED_CODE {
+                CANCELLED_LABEL.to_string()
+            } else {
+                code.to_string()
+            }
+        })
+}
+
+/// Whether the row's shown status code is a client cancellation.
+fn is_cancelled(row: &Row) -> bool {
+    row.status_code == Some(CANCELLED_CODE) && (row.status == model::Status::Failed || row.live)
 }
 
 /// Ellipsize only at UTF-8 character boundaries. Measure the entire candidate

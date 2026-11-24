@@ -307,6 +307,24 @@ fn token_cells_are_compact_and_the_cache_cell_carries_the_status_code() {
 }
 
 #[test]
+fn a_499_reads_as_a_cancellation_in_normal_text_colour() {
+    let cancelled = row(r#"{"model":"a","status":499}"#);
+    let rows = [cancelled.clone()];
+    let v = view(&rows, &[]);
+    for field in [DisplayField::Cache, DisplayField::Error] {
+        assert_eq!(Column::Field(field).text(&cancelled, 0), "取消");
+        assert_eq!(
+            Column::Field(field).color(&cancelled, &v, &[], &[]),
+            theme::TEXT_FAINT
+        );
+    }
+
+    // Other failures keep the red code.
+    let failed = row(r#"{"model":"a","status":500}"#);
+    assert_eq!(Column::Field(DisplayField::Cache).text(&failed, 0), "500");
+}
+
+#[test]
 fn retry_cells_distinguish_a_retry_from_a_handover() {
     assert_eq!(
         Column::Field(DisplayField::Retry).text(&row(r#"{"tries":3}"#), 0),
