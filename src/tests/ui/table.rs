@@ -55,6 +55,17 @@ fn the_status_dot_always_leads() {
 }
 
 #[test]
+fn failed_rows_keep_the_dot_and_gain_a_faint_red_wash() {
+    let rows = [row(FULL)];
+    let columns = Column::all(&view(&rows, &[]));
+    assert_eq!(columns[0], Column::Status);
+    assert_eq!(
+        theme::failed_row_color(),
+        theme::with_alpha(theme::RED, 0x1E)
+    );
+}
+
+#[test]
 fn columns_with_nothing_to_show_are_dropped() {
     let quiet = vec![row(r#"{"model":"gpt-5"}"#)];
     let shown = fields(&quiet, &[]);

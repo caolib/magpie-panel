@@ -363,6 +363,11 @@ pub(super) fn draw(
         if v.hover == Some(index) || v.selected == Some(index) {
             p.fill_rect(rect.x, rect.y, rect.w, rect.h, theme::CARD_HOVER);
         }
+        if row.status == model::Status::Failed {
+            // Drawn after the hover/selection fill so the red wash stays
+            // readable on the row under the pointer.
+            p.fill_rect(rect.x, rect.y, rect.w, rect.h, theme::failed_row_color());
+        }
         let mut x = rect.x;
         for (column, width) in columns.iter().zip(&widths) {
             let text = column.text(row, v.now);

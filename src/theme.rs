@@ -44,6 +44,12 @@ pub const YELLOW: u32 = 0xFFD2_9922;
 /// Bright, unambiguous highlight for the 流 / 转 / 透 marks.
 pub const WHITE: u32 = 0xFF_FF_FF_FF;
 
+/// The faint red wash behind a failed request. It supplements the leading
+/// status dot rather than replacing it.
+pub fn failed_row_color() -> u32 {
+    with_alpha(RED, 0x1E)
+}
+
 /// The single colour that encodes a request's state in the list.
 pub fn status_color(status: crate::model::Status) -> u32 {
     use crate::model::Status;
