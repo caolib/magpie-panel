@@ -35,6 +35,12 @@ const PROVIDER_MAX_WIDTH: f32 = 180.0;
 /// The status cell is a dot, not a word.
 const STATUS_DOT: &str = "●";
 
+/// Appended to the model name when Magpie recorded the call as the agent
+/// compacting its context (`kind == "compact"`).
+const COMPACT_MARK: &str = "压";
+/// Space between the model name and the compaction mark.
+const COMPACT_GAP: f32 = 4.0;
+
 /// Latency thresholds in milliseconds: past a minute the whole cell turns
 /// yellow, past two minutes red.
 const LATENCY_SLOW_MS: i64 = 60_000;
@@ -332,10 +338,15 @@ fn column_widths(
             for row in rows {
                 let text = column.text(row, now);
                 let mut cell = measure(&text);
-                if *column == Column::Field(DisplayField::Model) && row.logo.is_some() {
-                    // The mark and its gap are part of the cell's width, so the
-                    // text keeps its own breathing room.
-                    cell += (theme::ICON_SIZE + theme::ICON_GAP) * scale;
+                if *column == Column::Field(DisplayField::Model) {
+                    if row.logo.is_some() {
+                        // The mark and its gap are part of the cell's width, so
+                        // the text keeps its own breathing room.
+                        cell += (theme::ICON_SIZE + theme::ICON_GAP) * scale;
+                    }
+                    if row.is_compaction() {
+                        cell += measure(COMPACT_MARK) + COMPACT_GAP * scale;
+                    }
                 }
                 width = width.max(cell);
             }
@@ -453,6 +464,22 @@ pub(super) fn draw(
                 column.color(row, v, &providers, &models),
                 theme::ALIGN_NEAR,
             );
+            if *column == Column::Field(DisplayField::Model) && row.is_compaction() {
+                // Drawn after the name so it keeps its own colour even when
+                // the model cell is red for a Fable input alert.
+                let mark_w = p.dual_measure(&fonts.small, COMPACT_MARK);
+                let mark_x = text_x + p.dual_measure(&fonts.small, &text) + COMPACT_GAP * m.scale;
+                p.dual_text(
+                    &fonts.small,
+                    COMPACT_MARK,
+                    mark_x,
+                    rect.y,
+                    (mark_w + CELL_SLACK * m.scale).max(0.0),
+                    rect.h,
+                    theme::MAUVE,
+                    theme::ALIGN_NEAR,
+                );
+            }
             x += width;
         }
         p.fill_rect(rect.x, rect.y + rect.h - 1.0, rect.w, 1.0, theme::SEPARATOR);

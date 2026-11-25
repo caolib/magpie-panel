@@ -283,6 +283,7 @@ fn load_live_metadata(
         request.trace_status = None;
         request.trace_error = None;
         request.trace_fail = None;
+        request.trace_kind = None;
         request.trace_provider = None;
         request.trace_provider_name = None;
         request.trace_provider_account = None;
@@ -304,6 +305,12 @@ fn load_live_metadata(
                     .map(str::to_string);
             }
             request.trace_attempts = i64::try_from(route.tries.len()).unwrap_or(i64::MAX);
+            request.trace_kind = route
+                .kind
+                .as_deref()
+                .map(str::trim)
+                .filter(|kind| !kind.is_empty())
+                .map(str::to_string);
             // The feed's provider is only the initial route. Candidate order
             // is not execution order; the last try identifies the actual provider.
             if let Some(attempt) = route.tries.last().filter(|t| !t.id.trim().is_empty()) {
@@ -539,7 +546,7 @@ mod tests {
 
     fn live_trace() -> serde_json::Value {
         serde_json::json!({"routes":[{
-            "id":7,"time":"2026-10-20T09:00:00Z","session":"s","agent":"cli","model":"m","effort":" high ",
+            "id":7,"time":"2026-10-20T09:00:00Z","session":"s","agent":"cli","model":"m","effort":" high ","kind":"compact",
             "tries":[
                 {"model":"m","done":true,"status":429,"fail":"rate_limit","error":"try again"},
                 {"model":"m","done":false}
@@ -571,6 +578,8 @@ mod tests {
             let row = Row::from_active(&active[0]);
             assert!(row.live);
             assert_eq!(row.display_model(), "m(high)");
+            assert_eq!(active[0].trace_kind.as_deref(), Some("compact"));
+            assert!(row.is_compaction());
             assert_eq!(row.tries, 2);
             assert_eq!(row.status_code, Some(429));
             assert!(row.is_error());

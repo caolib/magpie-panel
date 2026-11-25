@@ -64,6 +64,8 @@ fn maps_every_wire_field_the_table_renders() {
     assert_eq!(row.agent.as_deref(), Some("Claude Code"));
     assert_eq!(row.host.as_deref(), Some("api.anthropic.com"));
     assert_eq!(row.tries, 2);
+    assert_eq!(row.kind.as_deref(), Some("chat"));
+    assert!(!row.is_compaction());
     assert_eq!(row.route_id, Some(77));
     assert_eq!(row.prompt_tokens, 1000);
     assert_eq!(row.cached_tokens, 4000);
@@ -326,6 +328,22 @@ fn routed_models_show_only_the_served_name_and_effort() {
 
     let plain = Row::from_record(&record(r#"{"req":"gpt-5","model":"gpt-5"}"#));
     assert_eq!(plain.display_model(), "gpt-5");
+}
+
+#[test]
+fn only_the_compact_kind_marks_a_compaction_request() {
+    let compact = Row::from_record(&record(r#"{"model":"m","kind":"compact"}"#));
+    assert!(compact.is_compaction());
+
+    for kind in [
+        "",
+        "chat",
+        "agent_summary_inferred",
+        "auto_mode_check_inferred",
+    ] {
+        let row = Row::from_record(&record(&format!(r#"{{"model":"m","kind":"{kind}"}}"#)));
+        assert!(!row.is_compaction(), "{kind:?} is not a compaction");
+    }
 }
 
 #[test]

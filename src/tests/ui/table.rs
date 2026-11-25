@@ -289,6 +289,22 @@ fn the_model_cell_prefers_the_served_model_with_its_effort() {
 }
 
 #[test]
+fn a_compaction_row_reserves_room_for_its_mark() {
+    let plain = [row(r#"{"model":"m"}"#)];
+    let compact = [row(r#"{"model":"m","kind":"compact"}"#)];
+    let columns = [Column::Field(DisplayField::Model)];
+    let mine = |s: &str| s.chars().count() as f32;
+    let plain_width = column_widths(&plain, &columns, 0, 1.0, mine)[0];
+    let compact_width = column_widths(&compact, &columns, 0, 1.0, mine)[0];
+    assert_eq!(
+        compact_width,
+        plain_width + COMPACT_MARK.chars().count() as f32 + COMPACT_GAP
+    );
+    // The name stays the cell's text; the mark is drawn beside it.
+    assert_eq!(Column::Field(DisplayField::Model).text(&compact[0], 0), "m");
+}
+
+#[test]
 fn token_cells_are_compact_and_the_cache_cell_carries_the_status_code() {
     let rows = [row(FULL)];
     let tokens = Column::Field(DisplayField::Tokens).text(&rows[0], 0);

@@ -137,6 +137,10 @@ pub struct UsageRecord {
     /// The model the provider's reply declared, when it said anything.
     #[serde(default)]
     pub served: Option<String>,
+    /// What the agent made the call for when it is not a conversation turn;
+    /// `"compact"` marks a context-compaction request.
+    #[serde(default)]
+    pub kind: Option<String>,
     #[serde(default)]
     pub effort: Option<String>,
     /// Input tokens, excluding cache reads and writes.
@@ -511,6 +515,9 @@ pub struct LiveRoute {
     pub agent: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
+    /// `"compact"` on a request that is compacting its context.
+    #[serde(default)]
+    pub kind: Option<String>,
     #[serde(default)]
     pub effort: Option<String>,
     #[serde(default)]
@@ -575,6 +582,8 @@ pub struct ActiveRequest {
     #[serde(skip)]
     pub trace_fail: Option<String>,
     #[serde(skip)]
+    pub trace_kind: Option<String>,
+    #[serde(skip)]
     pub trace_provider: Option<String>,
     #[serde(skip)]
     pub trace_provider_name: Option<String>,
@@ -613,6 +622,8 @@ pub struct Row {
     pub model: String,
     /// The model the reply declared (`served`), when present.
     pub served_model: Option<String>,
+    /// Magpie's raw call kind; `"compact"` marks a context-compaction request.
+    pub kind: Option<String>,
     /// Icon the model cell wears, from the model mappings. Captured before
     /// display aliases rewrite the name.
     pub logo: Option<Arc<crate::config::ModelLogo>>,
@@ -767,6 +778,7 @@ impl Row {
             requested_model: requested,
             model,
             served_model: non_empty(record.served.as_deref()),
+            kind: non_empty(record.kind.as_deref()),
             logo: None,
             provider: non_empty(record.provider_name.as_deref())
                 .or_else(|| non_empty(record.provider.as_deref())),
@@ -828,6 +840,7 @@ impl Row {
             requested_model: model.clone(),
             model,
             served_model: None,
+            kind: non_empty(active.trace_kind.as_deref()),
             raw_provider: provider.clone(),
             provider,
             provider_id,
@@ -931,6 +944,11 @@ impl Row {
             Some(effort) => format!("{}({})", model, effort),
             None => model.to_string(),
         }
+    }
+
+    /// Magpie marked this call as the agent compacting its context.
+    pub fn is_compaction(&self) -> bool {
+        self.kind.as_deref() == Some("compact")
     }
 
     /// How the inbound and upstream endpoints relate, for the protocol cell.
