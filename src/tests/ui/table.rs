@@ -577,6 +577,35 @@ fn supplier_width_is_capped_at_each_density_without_capping_other_columns() {
 }
 
 #[test]
+fn a_supplier_that_fits_its_column_exactly_is_not_ellipsized() {
+    // `column_widths` sizes the column as measured text plus padding; the
+    // budget must still hold the measured width after that padding is
+    // subtracted again, or the widest label truncates itself.
+    for scale in [1.0f32, 1.25, 1.5, 1.75, 1.87, 2.0] {
+        for step in 0..2000 {
+            let measured = step as f32 / 7.0;
+            let column = measured + CELL_HPAD * scale * 2.0;
+            assert!(
+                cell_text_width(column, scale) >= measured,
+                "scale {scale} measured {measured}"
+            );
+        }
+    }
+
+    // And the widest supplier label survives a real layout round trip.
+    let rows = [row(r#"{"provider":"QwenWork","model":"m"}"#)];
+    let columns = [Column::Field(DisplayField::Provider)];
+    let scale = 1.75;
+    let measure = |s: &str| s.chars().count() as f32 * 8.0 * scale;
+    let widths = column_widths(&rows, &columns, 0, scale, measure);
+    let full = columns[0].text(&rows[0], 0);
+    assert_eq!(
+        ellipsize(&full, cell_text_width(widths[0], scale), measure),
+        full
+    );
+}
+
+#[test]
 fn supplier_ellipsis_preserves_short_text_and_never_splits_unicode() {
     let measure = |s: &str| {
         s.chars()

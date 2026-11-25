@@ -21,6 +21,14 @@ const CELL_HPAD: f32 = 1.0;
 /// moment the layout rectangle is narrower than the measured text.
 const CELL_SLACK: f32 = 0.5;
 
+/// The space a cell's text may occupy: the column width minus padding, plus
+/// the draw slack. Without the slack, adding and removing the padding in f32
+/// can leave the budget a fraction of a pixel under the width the column was
+/// measured from, so a label that fits exactly ellipsizes itself.
+fn cell_text_width(width: f32, scale: f32) -> f32 {
+    (width - CELL_HPAD * scale * 2.0 + CELL_SLACK * scale).max(0.0)
+}
+
 /// Full supplier column width at base density, including horizontal padding.
 const PROVIDER_MAX_WIDTH: f32 = 180.0;
 
@@ -390,7 +398,7 @@ pub(super) fn draw(
         for (column, width) in columns.iter().zip(&widths) {
             let text = column.text(row, v.now);
             let text = if *column == Column::Field(DisplayField::Provider) {
-                ellipsize(&text, (width - hpad * 2.0).max(0.0), |s| {
+                ellipsize(&text, cell_text_width(*width, m.scale), |s| {
                     p.dual_measure(&fonts.small, s)
                 })
             } else {
