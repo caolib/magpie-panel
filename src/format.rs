@@ -29,33 +29,30 @@ pub fn cost(value: f64) -> String {
     }
 }
 
-/// `[456.5s|789.2s]`: time to first token, then total latency. A missing side
-/// is left out, so a request that failed before the first token reads `[4.5s]`.
+/// `456.5s|789s`: time to first token, then total latency. A missing side
+/// is left out, so a request that failed before the first token reads `4.5s`.
 pub fn latency(total_ms: Option<i64>, first_ms: Option<i64>) -> Option<String> {
     let total = total_ms.filter(|ms| *ms > 0).map(seconds);
     let first = first_ms.filter(|ms| *ms > 0).map(seconds);
     match (first, total) {
-        (Some(first), Some(total)) => Some(format!("[{first}|{total}]")),
-        (Some(only), None) | (None, Some(only)) => Some(format!("[{only}]")),
+        (Some(first), Some(total)) => Some(format!("{first}|{total}")),
+        (Some(only), None) | (None, Some(only)) => Some(only),
         (None, None) => None,
     }
 }
 
-/// One reading of the latency bracket: `4.5s`, `3m·10s`, `1h·02m`. The tenth is
-/// what a first token is measured in, so it is kept while the reading is under
-/// a minute; past that it is noise next to a number that long.
+/// One reading of the latency bracket, always in seconds: `4.5s`, `789s`.
+/// Minutes and hours would need a second unit to stay precise, and comparing
+/// raw seconds is easier than converting `13m·09s` back in your head. The
+/// tenth only matters for short waits, so past ten seconds it is dropped.
 fn seconds(ms: i64) -> String {
-    // Round to the displayed precision before choosing the unit, so `59.99s`
-    // reads `1m·00s` instead of a `60.0s` whose neighbour is `1m·00s`.
+    // Round to the displayed precision before choosing the form, so `9.96` reads
+    // `10s` rather than a `10.0s` whose neighbour is `10s`.
     let secs = (ms as f64 / 100.0).round() / 10.0;
-    if secs < 60.0 {
-        return format!("{secs:.1}s");
-    }
-    let whole = secs.round() as i64;
-    if whole < 3600 {
-        format!("{}m·{:02}s", whole / 60, whole % 60)
+    if secs < 10.0 {
+        format!("{secs:.1}s")
     } else {
-        format!("{}h·{:02}m", whole / 3600, (whole % 3600) / 60)
+        format!("{}s", secs.round() as i64)
     }
 }
 
