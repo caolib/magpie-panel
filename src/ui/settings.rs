@@ -845,7 +845,7 @@ impl Layout {
             });
             self.label(
                 192.0,
-                "图标：PNG/JPG 路径；底色如 #FFFFFF，留空即白色，none 为透明",
+                "图标：PNG/JPG 路径；底色如 #FFFFFF，white 为白色，留空或 none 为透明",
                 false,
             );
             list_y = 222.0;

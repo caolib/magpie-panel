@@ -365,14 +365,17 @@ fn a_mapping_can_carry_an_icon_and_its_background() {
 
 #[test]
 fn icon_backgrounds_parse_colours_and_explain_transparency() {
-    assert_eq!(parse_logo_bg(""), Some(0xFFFF_FFFF));
+    assert_eq!(parse_logo_bg(""), None);
+    assert_eq!(parse_logo_bg("none"), None);
+    assert_eq!(parse_logo_bg("transparent"), None);
+    assert_eq!(parse_logo_bg("透明"), None);
+    assert_eq!(parse_logo_bg("white"), Some(0xFFFF_FFFF));
+    assert_eq!(parse_logo_bg("WHITE"), Some(0xFFFF_FFFF));
+    assert_eq!(parse_logo_bg("白色"), Some(0xFFFF_FFFF));
     assert_eq!(parse_logo_bg("#fff"), Some(0xFFFF_FFFF));
     assert_eq!(parse_logo_bg("#0a0b0c"), Some(0xFF0A_0B0C));
     assert_eq!(parse_logo_bg("80FF0000"), Some(0x80FF_0000));
-    assert_eq!(parse_logo_bg("none"), None);
-    assert_eq!(parse_logo_bg("透明"), None);
-    // Unreadable input keeps the icon visible rather than dropping the fill.
-    assert_eq!(parse_logo_bg("not a colour"), Some(0xFFFF_FFFF));
+    assert_eq!(parse_logo_bg("not a colour"), None);
 }
 
 #[test]

@@ -217,8 +217,8 @@ pub struct NameAlias {
     /// use it; the other kinds ignore it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub logo: String,
-    /// Fill behind the icon, `#RRGGBB` (or `#AARRGGBB`). Empty means white;
-    /// `none`, `transparent` or `透明` leaves the icon on its own.
+    /// Fill behind the icon, `#RRGGBB` (or `#AARRGGBB`), or `white`/`白色`.
+    /// Empty, `none`, `transparent` or `透明` leaves the icon on its own.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub logo_bg: String,
 }
@@ -233,22 +233,21 @@ fn contains_ci(haystack: &str, needle: &str) -> bool {
             .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
-/// Colour behind a model icon. Empty input means white, the default the
-/// settings form offers; `none`, `transparent` or `透明` means no fill.
+/// Colour behind a model icon. Empty, `none`, `transparent` or `透明` means no
+/// fill; `white` or `白色` means opaque white.
 pub fn parse_logo_bg(text: &str) -> Option<u32> {
     let text = text.trim();
-    if text.is_empty() {
-        return Some(0xFFFF_FFFF);
-    }
-    if text.eq_ignore_ascii_case("none")
+    if text.is_empty()
+        || text.eq_ignore_ascii_case("none")
         || text.eq_ignore_ascii_case("transparent")
         || text == "透明"
     {
         return None;
     }
-    // A colour that does not parse still leaves the icon on a readable white
-    // square instead of vanishing against the dark panel.
-    parse_hex_color(text).or(Some(0xFFFF_FFFF))
+    if text.eq_ignore_ascii_case("white") || text == "白色" {
+        return Some(0xFFFF_FFFF);
+    }
+    parse_hex_color(text)
 }
 
 /// `#RGB`, `#RRGGBB` or `#AARRGGBB` as ARGB. The leading `#` is optional.

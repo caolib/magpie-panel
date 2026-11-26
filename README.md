@@ -166,7 +166,7 @@ cargo run --release
   ],
   "hiddenProviders": [],      // [{ "accountId": "a1", "provider": "anthropic" }]
   "modelAliases": [],         // [{ "from": "gpt-", "to": "", "logo": "C:\\icons\\chatgpt.png", "logoBg": "#FFFFFF" }]
-                              // logo: PNG/JPG 路径；logoBg: 圆角底色，#RRGGBB，#AARRGGBB，留空为白色，none 为透明
+                              // logo: PNG/JPG 路径；logoBg: 圆角底色，#RRGGBB，#AARRGGBB，white 为白色，留空或 none 为透明
   "providerAliases": [],      // [{ "from": "Anthropic", "to": "A社" }]
   "agentAliases": [],         // [{ "from": "Claude Code", "to": "CC" }]
   "hiddenFields": ["upstreamModel", "protocol", "cacheWrite", "cost", "completion", "source", "account"],
