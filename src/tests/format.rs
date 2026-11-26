@@ -49,23 +49,26 @@ fn cost_keeps_sub_cent_precision() {
 }
 
 #[test]
-fn latency_names_whichever_side_arrived() {
+fn latency_marks_whichever_side_is_missing() {
     assert_eq!(
         latency(Some(789_200), Some(456_500)).as_deref(),
         Some("457s|789s")
     );
-    assert_eq!(latency(Some(4_500), None).as_deref(), Some("4.5s"));
+    // Only the total arrived: a request still waiting on its first token, or a
+    // gateway that never recorded one.
+    assert_eq!(latency(Some(4_500), None).as_deref(), Some("-|4.5s"));
+    assert_eq!(latency(None, Some(4_500)).as_deref(), Some("4.5s|-"));
     assert_eq!(latency(None, None), None);
     assert_eq!(latency(Some(0), Some(0)), None);
 }
 
 #[test]
 fn latency_drops_the_tenth_past_ten_seconds() {
-    assert_eq!(latency(Some(9_900), None).as_deref(), Some("9.9s"));
-    assert_eq!(latency(Some(10_000), None).as_deref(), Some("10s"));
+    assert_eq!(latency(Some(9_900), None).as_deref(), Some("-|9.9s"));
+    assert_eq!(latency(Some(10_000), None).as_deref(), Some("-|10s"));
     // Rounding to the displayed precision happens before the form is chosen.
-    assert_eq!(latency(Some(9_960), None).as_deref(), Some("10s"));
-    assert_eq!(latency(Some(10_400), None).as_deref(), Some("10s"));
-    assert_eq!(latency(Some(59_400), None).as_deref(), Some("59s"));
-    assert_eq!(latency(Some(3_725_000), None).as_deref(), Some("3725s"));
+    assert_eq!(latency(Some(9_960), None).as_deref(), Some("-|10s"));
+    assert_eq!(latency(Some(10_400), None).as_deref(), Some("-|10s"));
+    assert_eq!(latency(Some(59_400), None).as_deref(), Some("-|59s"));
+    assert_eq!(latency(Some(3_725_000), None).as_deref(), Some("-|3725s"));
 }

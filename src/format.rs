@@ -29,17 +29,22 @@ pub fn cost(value: f64) -> String {
     }
 }
 
-/// `456.5s|789s`: time to first token, then total latency. A missing side
-/// is left out, so a request that failed before the first token reads `4.5s`.
+/// `456.5s|789s`: time to first token, then total latency. A side the gateway
+/// did not report draws `-`, so `4.5s|-` and `-|4.5s` say *which* half is
+/// missing instead of looking like a different format. Both missing is blank.
 pub fn latency(total_ms: Option<i64>, first_ms: Option<i64>) -> Option<String> {
     let total = total_ms.filter(|ms| *ms > 0).map(seconds);
     let first = first_ms.filter(|ms| *ms > 0).map(seconds);
     match (first, total) {
         (Some(first), Some(total)) => Some(format!("{first}|{total}")),
-        (Some(only), None) | (None, Some(only)) => Some(only),
+        (Some(first), None) => Some(format!("{first}|{UNKNOWN}")),
+        (None, Some(total)) => Some(format!("{UNKNOWN}|{total}")),
         (None, None) => None,
     }
 }
+
+/// Stands in for a latency half the gateway did not report.
+const UNKNOWN: &str = "-";
 
 /// One reading of the latency bracket, always in seconds: `4.5s`, `789s`.
 /// Minutes and hours would need a second unit to stay precise, and comparing
