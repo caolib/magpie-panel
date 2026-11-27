@@ -360,6 +360,31 @@ fn column_widths(
         .collect()
 }
 
+/// Draw `first|total` with the bar a shade fainter. `MeasureString` pads a
+/// string on both sides and `DrawString` leaves that as a left inset, so
+/// advancing by the measured width would gap the pieces; advance by the bare
+/// glyph width instead — measured minus the shared padding, which two single
+/// bars minus a double bar cancel the advance down to.
+fn draw_latency(p: &Painter, fonts: &theme::Fonts, text: &str, area: RectF, color: u32) {
+    let (x, y, w, h) = (area.X, area.Y, area.Width, area.Height);
+    let f = &fonts.small;
+    let Some((first, total)) = text.split_once('|') else {
+        p.dual_text(f, text, x, y, w, h, color, theme::ALIGN_NEAR);
+        return;
+    };
+    let m = |s: &str| p.dual_measure(f, s);
+    let pad = 2.0 * m("|") - m("||");
+    let bar_x = x + m(first) - pad;
+    let total_x = bar_x + m("|") - pad;
+    for (s, x0, c) in [
+        (first, x, color),
+        ("|", bar_x, theme::TEXT_FAINT),
+        (total, total_x, color),
+    ] {
+        p.dual_text(f, s, x0, y, (x + w - x0).max(0.0), h, c, theme::ALIGN_NEAR);
+    }
+}
+
 /// Draw the table and report the client width that fits it, or `None` when
 /// there is nothing to size.
 pub(super) fn draw(
@@ -454,16 +479,28 @@ pub(super) fn draw(
                 text_x += advance;
                 text_w -= advance;
             }
-            p.dual_text(
-                &fonts.small,
-                &text,
-                text_x,
-                rect.y,
-                (text_w + CELL_SLACK * m.scale).max(0.0),
-                rect.h,
-                column.color(row, v, &providers, &models),
-                theme::ALIGN_NEAR,
-            );
+            let color = column.color(row, v, &providers, &models);
+            let draw_w = (text_w + CELL_SLACK * m.scale).max(0.0);
+            if *column == Column::Field(DisplayField::Latency) {
+                let area = RectF {
+                    X: text_x,
+                    Y: rect.y,
+                    Width: draw_w,
+                    Height: rect.h,
+                };
+                draw_latency(p, fonts, &text, area, color);
+            } else {
+                p.dual_text(
+                    &fonts.small,
+                    &text,
+                    text_x,
+                    rect.y,
+                    draw_w,
+                    rect.h,
+                    color,
+                    theme::ALIGN_NEAR,
+                );
+            }
             if *column == Column::Field(DisplayField::Model) && row.is_compaction() {
                 // Drawn after the name so it keeps its own colour even when
                 // the model cell is red for a Fable input alert.
